@@ -19,6 +19,7 @@ type Controller interface {
 	RequestMount(id string)
 	RequestUnmount(id string)
 	OpenSettings()
+	OpenPhoneLink()
 	MountAll()
 	UnmountAll()
 	SetAutostart(enabled bool) error
@@ -82,6 +83,7 @@ func (t *Tray) rebuild() {
 
 	items = append(items,
 		fyne.NewMenuItem("Settings", func() { t.ctrl.OpenSettings() }),
+		fyne.NewMenuItem("Phone link...", func() { t.ctrl.OpenPhoneLink() }),
 		fyne.NewMenuItem("Mount all", func() { t.ctrl.MountAll(); t.Rebuild() }),
 		fyne.NewMenuItem("Unmount all", func() { t.ctrl.UnmountAll(); t.Rebuild() }),
 		fyne.NewMenuItemSeparator(),

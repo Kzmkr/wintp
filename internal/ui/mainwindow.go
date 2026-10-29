@@ -3,6 +3,7 @@ package ui
 import (
 	"errors"
 	"fmt"
+	"image/color"
 	"log"
 	"net/url"
 	"regexp"
@@ -10,8 +11,10 @@ import (
 	"strings"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
@@ -20,11 +23,11 @@ import (
 	"wintp/internal/util"
 )
 
-
 var rcloneSizeOrDurationPattern = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?([KMGTPEkmgtpe]i?[Bb]?|[Bb]|ms|[smhdwMy])?$`)
 
 // SettingsController is the interface the window uses to talk to the app coordinator.
 type SettingsController interface {
+	PhoneController
 	Connections() []*store.Connection
 	MountStatus(id string) mount.Status
 	RequestMount(id string)
@@ -49,26 +52,36 @@ type MainWindow struct {
 	ctrl SettingsController
 
 	// list state
-	conns       []*store.Connection
-	selectedIdx int // -1=none, ==len(conns)=new
+	conns       []*store.Connection // currently displayed (filtered) connections
+	selectedIdx int                 // -1=none, ==len(conns)=new
 
-	list *widget.List
+	list        *widget.List
+	searchEntry *widget.Entry
+	footerLbl   *widget.Label
+
+	// phone link entry (sidebar row + right-hand panel)
+	phoneRow   *phoneRow
+	phonePanel *phonePanel
 
 	// fixed editor widgets (always present)
-	editorTitle    *widget.Label
-	providerSel    *widget.Select // provider selector
-	nameEntry      *widget.Entry
-	pathEntry      *widget.Entry
-	driveSelect    *widget.Select
-	cacheSelect    *widget.Select
-	autoMountChk   *widget.Check
-	autoReconChk   *widget.Check
-	testStatusLbl  *widget.Label
-	oauthStatusLbl *widget.Label
-	mountBtn       *widget.Button
-	saveBtn        *widget.Button
-	cancelBtn      *widget.Button
-	deleteBtn      *widget.Button
+	editorTitle     *widget.Label
+	editorSubtitle  *widget.Label
+	providerCards   []*providerCard // featured provider quick-pick grid
+	providerSel     *widget.Select  // full catalog fallback ("more providers")
+	nameEntry       *widget.Entry
+	pathEntry       *widget.Entry
+	driveSelect     *widget.Select
+	cacheSeg        *segmentedControl
+	cacheCaptionLbl *widget.Label
+	autoMountToggle *toggleSwitch
+	autoReconToggle *toggleSwitch
+	testStatusLbl   *widget.Label
+	oauthStatusLbl  *widget.Label
+	mountBtn        *widget.Button
+	mountBtnWrap    fyne.CanvasObject // short-button wrapper; Hide/Show this, not mountBtn, to collapse its space
+	saveBtn         *widget.Button
+	cancelBtn       *widget.Button
+	deleteBtn       *widget.Button
 
 	// VFS / mount tuning widgets
 	cacheMaxSizeEntry  *widget.Entry
@@ -80,8 +93,8 @@ type MainWindow struct {
 	// dynamic provider-specific form
 	providerDef    *ProviderDef
 	providerFields map[string]*widget.Entry // key -> entry widget
-	fieldForm      *widget.Form             // rebuilt per provider
-	fieldFormWrap  *fyne.Container          // container.NewMax holding fieldForm
+	fieldForm      *fyne.Container          // rebuilt per provider; rows of one or two paired fields
+	fieldFormWrap  *fyne.Container          // holds fieldForm
 
 	// right panel switcher
 	rightStack    *fyne.Container
@@ -93,8 +106,10 @@ type MainWindow struct {
 func OpenMainWindow(a fyne.App, ctrl SettingsController) *MainWindow {
 	mw := &MainWindow{ctrl: ctrl, selectedIdx: -1}
 	mw.conns = ctrl.Connections()
+	mw.phonePanel = newPhonePanel(ctrl, mw.win)
 	mw.initFixedWidgets()
 	mw.buildWindow(a)
+	mw.updateFooter()
 	return mw
 }
 
@@ -110,12 +125,63 @@ func (mw *MainWindow) Window() fyne.Window { return mw.win }
 // Refresh re-loads the connection list and updates mount button. Safe from any goroutine.
 func (mw *MainWindow) Refresh() {
 	fyne.Do(func() {
-		mw.conns = mw.ctrl.Connections()
-		mw.list.Refresh()
+		mw.phonePanel.Refresh()
+		mw.phoneRow.Update()
+		mw.applyFilter()
 		if mw.selectedIdx >= 0 && mw.selectedIdx < len(mw.conns) {
 			mw.refreshMountBtn(mw.conns[mw.selectedIdx])
 		}
 	})
+}
+
+// applyFilter re-reads connections from the controller and narrows mw.conns
+// to those matching the search box, then refreshes the list and footer.
+func (mw *MainWindow) applyFilter() {
+	all := mw.ctrl.Connections()
+	q := ""
+	if mw.searchEntry != nil {
+		q = strings.ToLower(strings.TrimSpace(mw.searchEntry.Text))
+	}
+	if q == "" {
+		mw.conns = all
+	} else {
+		filtered := make([]*store.Connection, 0, len(all))
+		for _, c := range all {
+			if strings.Contains(strings.ToLower(c.Name), q) ||
+				strings.Contains(strings.ToLower(providerDisplayName(c)), q) {
+				filtered = append(filtered, c)
+			}
+		}
+		mw.conns = filtered
+	}
+	if mw.list != nil {
+		mw.list.Refresh()
+	}
+	mw.updateFooter()
+}
+
+// updateFooter sets the sidebar's "N connections · M mounted" summary line,
+// always counting the full (unfiltered) connection set.
+func (mw *MainWindow) updateFooter() {
+	if mw.footerLbl == nil {
+		return
+	}
+	all := mw.ctrl.Connections()
+	mounted := 0
+	for _, c := range all {
+		if mw.ctrl.MountStatus(c.ID).State == mount.StateMounted {
+			mounted++
+		}
+	}
+	word := "connections"
+	if len(all) == 1 {
+		word = "connection"
+	}
+	mountedText := fmt.Sprintf("%d mounted", mounted)
+	if mounted == 0 {
+		mountedText = "none mounted"
+	}
+	mw.footerLbl.SetText(fmt.Sprintf("%d %s · %s", len(all), word, mountedText))
 }
 
 // window construction
@@ -139,12 +205,52 @@ func (mw *MainWindow) buildWindow(a fyne.App) {
 }
 
 func (mw *MainWindow) buildLeft() fyne.CanvasObject {
-	heading := widget.NewLabelWithStyle("Connections", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	brandIcon := widget.NewIcon(theme.StorageIcon())
+	brandLbl := widget.NewLabelWithStyle("wintp", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	addBtn := widget.NewButtonWithIcon("", theme.ContentAddIcon(), func() {
+		mw.list.UnselectAll()
+		mw.showNewEditor()
+	})
+	brandRow := container.NewBorder(nil, nil,
+		container.NewHBox(brandIcon, brandLbl), addBtn,
+		layout.NewSpacer(),
+	)
+
+	mw.searchEntry = widget.NewEntry()
+	mw.searchEntry.PlaceHolder = "Search"
+	mw.searchEntry.OnChanged = func(string) {
+		mw.cancelEdit()
+		mw.applyFilter()
+	}
+
+	mw.phoneRow = newPhoneRow(mw.ctrl, mw.ShowPhone)
+	mw.phonePanel.onChange = mw.phoneRow.Update
+	deviceLbl := widget.NewLabelWithStyle("DEVICES", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	deviceLbl.Importance = widget.LowImportance
+
+	sectionLbl := widget.NewLabelWithStyle("CONNECTIONS", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	sectionLbl.Importance = widget.LowImportance
 
 	mw.list = widget.NewList(
 		func() int { return len(mw.conns) },
 		func() fyne.CanvasObject {
-			return widget.NewLabel("[ ] Placeholder   X:")
+			badgeBg := canvas.NewRectangle(theme.Color(theme.ColorNameInputBackground))
+			badgeBg.CornerRadius = 6
+			badgeBg.StrokeWidth = 1
+			badgeBg.StrokeColor = theme.Color(theme.ColorNameInputBorder)
+			badgeLbl := widget.NewLabelWithStyle("", fyne.TextAlignCenter, fyne.TextStyle{Bold: true, Monospace: true})
+			badge := container.NewGridWrap(fyne.NewSize(36, 36),
+				container.NewStack(badgeBg, container.NewCenter(badgeLbl)))
+
+			name := widget.NewLabelWithStyle("", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+			sub := widget.NewLabel("")
+			sub.Importance = widget.LowImportance
+			text := container.NewVBox(name, sub)
+
+			dot := canvas.NewCircle(theme.Color(theme.ColorNameDisabled))
+			dotWrap := container.NewGridWrap(fyne.NewSize(8, 8), dot)
+
+			return container.NewBorder(nil, nil, badge, container.NewCenter(dotWrap), text)
 		},
 		func(id widget.ListItemID, o fyne.CanvasObject) {
 			if id >= len(mw.conns) {
@@ -152,7 +258,25 @@ func (mw *MainWindow) buildLeft() fyne.CanvasObject {
 			}
 			c := mw.conns[id]
 			st := mw.ctrl.MountStatus(c.ID)
-			o.(*widget.Label).SetText(statusDot(st.State) + " " + c.Name + "   " + c.DriveLetter + ":")
+
+			row := o.(*fyne.Container)
+			text := row.Objects[0].(*fyne.Container)
+			badge := row.Objects[1].(*fyne.Container)
+			dotCenter := row.Objects[2].(*fyne.Container)
+
+			badgeStack := badge.Objects[0].(*fyne.Container)
+			badgeLbl := badgeStack.Objects[1].(*fyne.Container).Objects[0].(*widget.Label)
+			badgeLbl.SetText(badgeFor(providerForConn(c)))
+
+			dotWrap := dotCenter.Objects[0].(*fyne.Container)
+			dot := dotWrap.Objects[0].(*canvas.Circle)
+			dot.FillColor = statusColor(st.State)
+			dot.Refresh()
+
+			name := text.Objects[0].(*widget.Label)
+			sub := text.Objects[1].(*widget.Label)
+			name.SetText(c.Name)
+			sub.SetText(c.DriveLetter + ":  ·  " + providerDisplayName(c))
 		},
 	)
 	mw.list.OnSelected = func(id widget.ListItemID) {
@@ -161,30 +285,61 @@ func (mw *MainWindow) buildLeft() fyne.CanvasObject {
 		}
 	}
 
-	addBtn := widget.NewButtonWithIcon("Add Connection", theme.ContentAddIcon(), func() {
-		mw.list.UnselectAll()
-		mw.showNewEditor()
-	})
-
-	return container.NewBorder(
-		container.NewPadded(heading),
-		container.NewPadded(addBtn),
-		nil, nil,
-		mw.list,
+	top := container.NewVBox(
+		container.NewPadded(brandRow),
+		container.NewPadded(mw.searchEntry),
+		container.NewPadded(deviceLbl),
+		mw.phoneRow.Object(),
+		container.NewPadded(sectionLbl),
 	)
+
+	mw.footerLbl = widget.NewLabel("")
+	mw.footerLbl.Importance = widget.LowImportance
+	footerDot := canvas.NewCircle(theme.Color(theme.ColorNameDisabled))
+	footer := container.NewVBox(
+		widget.NewSeparator(),
+		container.NewPadded(container.NewHBox(
+			container.NewCenter(container.NewGridWrap(fyne.NewSize(8, 8), footerDot)),
+			mw.footerLbl,
+		)),
+	)
+
+	return container.NewBorder(top, footer, nil, nil, mw.list)
 }
 
 func (mw *MainWindow) buildHint() fyne.CanvasObject {
-	lbl := widget.NewLabel("Select a connection to edit,\nor click Add Connection to create one.")
-	lbl.Alignment = fyne.TextAlignCenter
-	lbl.Wrapping = fyne.TextWrapWord
-	return container.NewCenter(lbl)
+	icon := widget.NewIcon(theme.StorageIcon())
+	iconWrap := container.NewGridWrap(fyne.NewSize(48, 48), icon)
+
+	title := widget.NewLabelWithStyle("No connection selected", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
+	body := widget.NewLabel("Select a connection on the left to edit it,\nor add a new one to mount a drive.")
+	body.Alignment = fyne.TextAlignCenter
+	body.Wrapping = fyne.TextWrapWord
+	body.Importance = widget.LowImportance
+
+	return container.NewCenter(container.NewVBox(
+		container.NewCenter(iconWrap),
+		title,
+		body,
+	))
+}
+
+// cacheModeCaptions gives each VFS cache mode a one-line explanation shown
+// under the segmented control, matching rclone's --vfs-cache-mode semantics.
+var cacheModeCaptions = map[string]string{
+	string(store.CacheModeOff):     "No local cache. Lowest memory use, slowest for repeated reads.",
+	string(store.CacheModeMinimal): "Caches file structure only. Good default for most servers.",
+	string(store.CacheModeWrites):  "Caches writes on disk. Needed by apps that seek while writing.",
+	string(store.CacheModeFull):    "Caches reads and writes on disk. Best compatibility with Office and editors.",
 }
 
 func (mw *MainWindow) initFixedWidgets() {
 	mw.editorTitle = widget.NewLabelWithStyle("", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	mw.editorSubtitle = widget.NewLabel("")
+	mw.editorSubtitle.Importance = widget.LowImportance
 
-	// Build provider name list in group order
+	// Full catalog fallback dropdown, in group order, for providers not in
+	// the featured quick-pick grid.
 	var providerNames []string
 	for _, group := range ProviderGroups {
 		for _, p := range Providers {
@@ -195,30 +350,45 @@ func (mw *MainWindow) initFixedWidgets() {
 	}
 
 	mw.providerSel = widget.NewSelect(providerNames, nil)
+	mw.providerSel.PlaceHolder = "More providers…"
 	mw.providerSel.OnChanged = func(name string) {
 		def := FindProviderByName(name)
 		if def == nil {
 			return
 		}
-		mw.rebuildProviderFields(def, nil)
+		mw.applyProviderSelection(def, nil)
+		mw.editorSubtitle.SetText(def.Name + "  →  " + mw.driveSelect.Selected + ":")
+	}
+
+	mw.providerCards = nil
+	for _, def := range FeaturedProviders() {
+		def := def
+		mw.providerCards = append(mw.providerCards, newProviderCard(def.Name, def.Subtitle, func() {
+			mw.applyProviderSelection(def, nil)
+			mw.editorSubtitle.SetText(def.Name + "  →  " + mw.driveSelect.Selected + ":")
+		}))
 	}
 
 	mw.nameEntry = widget.NewEntry()
-	mw.nameEntry.PlaceHolder = "My Server"
+	mw.nameEntry.PlaceHolder = "My server"
 
 	mw.pathEntry = widget.NewEntry()
 	mw.pathEntry.SetText("/")
 
 	mw.driveSelect = widget.NewSelect(nil, nil)
 
-	mw.cacheSelect = widget.NewSelect(
+	mw.cacheCaptionLbl = widget.NewLabel("")
+	mw.cacheCaptionLbl.Importance = widget.LowImportance
+	mw.cacheCaptionLbl.Wrapping = fyne.TextWrapWord
+
+	mw.cacheSeg = newSegmentedControl(
 		[]string{string(store.CacheModeOff), string(store.CacheModeMinimal),
 			string(store.CacheModeWrites), string(store.CacheModeFull)},
-		nil,
+		func(v string) { mw.cacheCaptionLbl.SetText(cacheModeCaptions[v]) },
 	)
 
-	mw.autoMountChk = widget.NewCheck("Auto-mount on startup", nil)
-	mw.autoReconChk = widget.NewCheck("Auto-reconnect on error", nil)
+	mw.autoMountToggle = newToggleSwitch(false, nil)
+	mw.autoReconToggle = newToggleSwitch(false, nil)
 
 	mw.testStatusLbl = widget.NewLabel("")
 	mw.testStatusLbl.Wrapping = fyne.TextWrapWord
@@ -226,15 +396,15 @@ func (mw *MainWindow) initFixedWidgets() {
 	mw.oauthStatusLbl = widget.NewLabel("")
 	mw.oauthStatusLbl.Wrapping = fyne.TextWrapWord
 
-	mw.mountBtn = widget.NewButton("Mount", nil)
+	mw.mountBtn = widget.NewButtonWithIcon("Mount", theme.MediaPlayIcon(), nil)
 	mw.mountBtn.Importance = widget.SuccessImportance
 
-	mw.saveBtn = widget.NewButton("Save", nil)
+	mw.saveBtn = widget.NewButtonWithIcon("Save", theme.ConfirmIcon(), nil)
 	mw.saveBtn.Importance = widget.HighImportance
 
-	mw.cancelBtn = widget.NewButton("Cancel", nil)
+	mw.cancelBtn = widget.NewButtonWithIcon("Cancel", theme.CancelIcon(), nil)
 
-	mw.deleteBtn = widget.NewButton("Delete", nil)
+	mw.deleteBtn = widget.NewButtonWithIcon("Delete", theme.DeleteIcon(), nil)
 	mw.deleteBtn.Importance = widget.DangerImportance
 
 	mw.cacheMaxSizeEntry = widget.NewEntry()
@@ -253,60 +423,145 @@ func (mw *MainWindow) initFixedWidgets() {
 	mw.readChunkSizeEntry.PlaceHolder = "e.g. 128M  (empty = rclone default)"
 }
 
+// sectionHeading returns a bold title with a muted one-line description
+// underneath, matching the "Provider / Where the files live." style used
+// throughout the editor.
+func sectionHeading(title, subtitle string) fyne.CanvasObject {
+	t := widget.NewLabelWithStyle(title, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	if subtitle == "" {
+		return t
+	}
+	s := widget.NewLabel(subtitle)
+	s.Importance = widget.LowImportance
+	return container.NewVBox(t, s)
+}
+
 // buildEditorShell builds the static editor chrome; the dynamic form area is in fieldFormWrap.
 func (mw *MainWindow) buildEditorShell() fyne.CanvasObject {
-	topForm := widget.NewForm(
-		widget.NewFormItem("Name", mw.nameEntry),
-		widget.NewFormItem("Provider", mw.providerSel),
+	nameForm := widget.NewForm(widget.NewFormItem("Name", mw.nameEntry))
+
+	cardsGrid := container.NewGridWithColumns(4)
+	for _, card := range mw.providerCards {
+		cardsGrid.Add(card)
+	}
+	providerSection := container.NewVBox(
+		sectionHeading("Provider", "Where the files live."),
+		cardsGrid,
+		mw.providerSel,
 	)
 
-	bottomForm := widget.NewForm(
-		widget.NewFormItem("Remote Path", mw.pathEntry),
-		widget.NewFormItem("Drive Letter", mw.driveSelect),
-		widget.NewFormItem("VFS Cache Mode", mw.cacheSelect),
-	)
-
-	cacheForm := widget.NewForm(
-		widget.NewFormItem("Max Cache Size", mw.cacheMaxSizeEntry),
-		widget.NewFormItem("Max Cache Age", mw.cacheMaxAgeEntry),
-		widget.NewFormItem("Dir Cache Time", mw.dirCacheTimeEntry),
-		widget.NewFormItem("Buffer Size", mw.bufferSizeEntry),
-		widget.NewFormItem("Read Chunk Size", mw.readChunkSizeEntry),
-	)
-	cacheSection := widget.NewAccordion(
-		widget.NewAccordionItem("Advanced Cache Settings", cacheForm),
-	)
-
-	testBtn := widget.NewButton("Test Connection", mw.testConnection)
-	testRow := container.NewBorder(nil, nil, nil, testBtn, mw.testStatusLbl)
-
-	authorizeBtn := widget.NewButton("Authorize in Browser", mw.doOAuthAuthorize)
+	testBtn := widget.NewButtonWithIcon("Test", theme.ViewRefreshIcon(), mw.testConnection)
+	authorizeBtn := widget.NewButtonWithIcon("Authorize in Browser", theme.LoginIcon(), mw.doOAuthAuthorize)
 	authorizeBtn.Importance = widget.SuccessImportance
 	oauthSection := container.NewVBox(authorizeBtn, mw.oauthStatusLbl)
 
-	scrollable := container.NewScroll(container.NewVBox(
-		topForm,
-		widget.NewSeparator(),
+	signInSection := container.NewVBox(
+		sectionHeading("Sign in", "Stored in the Windows Credential Manager."),
 		mw.fieldFormWrap, // provider-specific fields live here
 		oauthSection,
+	)
+
+	connectionCard := widget.NewCard("", "", container.NewVBox(
+		nameForm,
 		widget.NewSeparator(),
-		bottomForm,
-		cacheSection,
-		mw.autoMountChk,
-		mw.autoReconChk,
+		providerSection,
+		widget.NewSeparator(),
+		signInSection,
 	))
 
-	return container.NewBorder(
-		container.NewVBox(mw.editorTitle, widget.NewSeparator(), mw.mountBtn),
-		container.NewVBox(
-			widget.NewSeparator(),
-			testRow,
-			widget.NewSeparator(),
-			container.NewHBox(mw.saveBtn, mw.cancelBtn, mw.deleteBtn),
-		),
-		nil, nil,
-		scrollable,
+	mountForm := widget.NewForm(
+		widget.NewFormItem("Remote path", mw.pathEntry),
+		widget.NewFormItem("Drive letter", mw.driveSelect),
 	)
+
+	cacheModeSection := container.NewVBox(
+		widget.NewLabel("VFS cache"),
+		mw.cacheSeg.CanvasObject(),
+		mw.cacheCaptionLbl,
+	)
+
+	behaviorSection := container.NewVBox(
+		widget.NewSeparator(),
+		settingsRow("Mount on startup", "Connect when wintp launches.", mw.autoMountToggle),
+		widget.NewSeparator(),
+		settingsRow("Reconnect on error", "Retry automatically if the connection drops.", mw.autoReconToggle),
+	)
+
+	mountCard := widget.NewCard("", "", container.NewVBox(
+		sectionHeading("Mount", "How it shows up in File Explorer."),
+		mountForm,
+		cacheModeSection,
+		behaviorSection,
+	))
+
+	cacheForm := widget.NewForm(
+		widget.NewFormItem("Max cache size", mw.cacheMaxSizeEntry),
+		widget.NewFormItem("Max cache age", mw.cacheMaxAgeEntry),
+		widget.NewFormItem("Dir cache time", mw.dirCacheTimeEntry),
+		widget.NewFormItem("Buffer size", mw.bufferSizeEntry),
+		widget.NewFormItem("Read chunk size", mw.readChunkSizeEntry),
+	)
+	advancedCard := widget.NewCard("", "", widget.NewAccordion(
+		widget.NewAccordionItem("Advanced cache settings", cacheForm),
+	))
+
+	scrollable := container.NewScroll(container.NewVBox(
+		connectionCard,
+		mountCard,
+		advancedCard,
+	))
+
+	const actionBtnHeight = 32
+	const actionGap = 10
+	mw.mountBtnWrap = shortButton(actionBtnHeight, mw.mountBtn)
+	actions := container.NewHBox(
+		mw.mountBtnWrap, hGap(actionGap),
+		shortButton(actionBtnHeight, testBtn), hGap(actionGap),
+		shortButton(actionBtnHeight, mw.cancelBtn), hGap(actionGap),
+		shortButton(actionBtnHeight, mw.saveBtn),
+	)
+	headerTop := container.NewBorder(nil, nil, nil, actions,
+		container.NewVBox(mw.editorTitle, mw.editorSubtitle),
+	)
+	header := container.NewVBox(
+		container.NewPadded(headerTop),
+		container.NewPadded(mw.testStatusLbl),
+		widget.NewSeparator(),
+	)
+
+	footer := container.NewVBox(
+		widget.NewSeparator(),
+		container.NewPadded(mw.deleteBtn),
+	)
+
+	return container.NewBorder(header, footer, nil, nil, scrollable)
+}
+
+// setProviderSelection reflects def as the chosen provider across both the
+// featured card grid and the "more providers" dropdown, keeping them
+// mutually exclusive without re-triggering each other's OnChanged handler.
+func (mw *MainWindow) setProviderSelection(def *ProviderDef) {
+	featured := false
+	for _, card := range mw.providerCards {
+		sel := card.title == def.Name
+		card.SetSelected(sel)
+		if sel {
+			featured = true
+		}
+	}
+	switch {
+	case featured && mw.providerSel.Selected != "":
+		mw.providerSel.ClearSelected()
+	case !featured && mw.providerSel.Selected != def.Name:
+		mw.providerSel.SetSelected(def.Name)
+	}
+}
+
+// applyProviderSelection selects def in the picker and rebuilds the
+// provider-specific form fields, optionally pre-filled from existing.
+func (mw *MainWindow) applyProviderSelection(def *ProviderDef, existing map[string]string) {
+	mw.setProviderSelection(def)
+	mw.rebuildProviderFields(def, existing)
 }
 
 // rebuildProviderFields swaps in a new form for the selected provider.
@@ -315,8 +570,7 @@ func (mw *MainWindow) rebuildProviderFields(def *ProviderDef, existing map[strin
 	mw.providerDef = def
 	mw.providerFields = make(map[string]*widget.Entry)
 
-	var items []*widget.FormItem
-	for _, f := range def.Fields {
+	buildEntry := func(f FormField) *widget.Entry {
 		e := widget.NewEntry()
 		if f.IsPassword {
 			e = widget.NewPasswordEntry()
@@ -336,10 +590,29 @@ func (mw *MainWindow) rebuildProviderFields(def *ProviderDef, existing map[strin
 			e.PlaceHolder = f.Placeholder
 		}
 		mw.providerFields[f.Key] = e
-		items = append(items, widget.NewFormItem(f.Label, e))
+		return e
 	}
 
-	mw.fieldForm = widget.NewForm(items...)
+	// Fields sharing a Row tag (e.g. host+port, user+pass) are laid out two
+	// to a row instead of each spanning the full width.
+	var rows []fyne.CanvasObject
+	for i := 0; i < len(def.Fields); {
+		f := def.Fields[i]
+		item1 := widget.NewForm(widget.NewFormItem(f.Label, buildEntry(f)))
+
+		if f.Row != "" && i+1 < len(def.Fields) && def.Fields[i+1].Row == f.Row {
+			f2 := def.Fields[i+1]
+			item2 := widget.NewForm(widget.NewFormItem(f2.Label, buildEntry(f2)))
+			rows = append(rows, container.NewGridWithColumns(2, item1, item2))
+			i += 2
+			continue
+		}
+
+		rows = append(rows, item1)
+		i++
+	}
+
+	mw.fieldForm = container.NewVBox(rows...)
 	mw.fieldFormWrap.Objects = []fyne.CanvasObject{mw.fieldForm}
 	mw.fieldFormWrap.Refresh()
 
@@ -358,28 +631,25 @@ func (mw *MainWindow) rebuildProviderFields(def *ProviderDef, existing map[strin
 // editor show / hide
 
 func (mw *MainWindow) showEditor(idx int) {
+	mw.phoneRow.SetSelected(false)
 	mw.selectedIdx = idx
 	c := mw.conns[idx]
 
-	mw.editorTitle.SetText("Edit - " + c.Name)
+	mw.editorTitle.SetText(c.Name)
+	mw.editorSubtitle.SetText(providerDisplayName(c) + "  →  " + c.DriveLetter + ":")
 	mw.nameEntry.SetText(c.Name)
 	mw.pathEntry.SetText(c.RemotePath)
-	mw.autoMountChk.SetChecked(c.AutoMount)
-	mw.autoReconChk.SetChecked(c.AutoReconnect)
-	mw.cacheSelect.SetSelected(string(c.CacheMode))
+	mw.autoMountToggle.SetChecked(c.AutoMount)
+	mw.autoReconToggle.SetChecked(c.AutoReconnect)
+	mw.cacheSeg.SetSelected(string(c.CacheMode))
+	mw.cacheCaptionLbl.SetText(cacheModeCaptions[string(c.CacheMode)])
 
-	// Determine the UI type (prefer _uiType from Config, fall back to Provider).
-	uiType := c.Config[store.ConfigKeyUIType]
-	if uiType == "" {
-		uiType = c.Provider
-	}
-	def := FindProvider(uiType)
+	def := providerForConn(c)
 	if def == nil && len(Providers) > 0 {
 		def = &Providers[0]
 	}
 	if def != nil {
-		mw.providerSel.SetSelected(def.Name)
-		mw.rebuildProviderFields(def, c.Config)
+		mw.applyProviderSelection(def, c.Config)
 		// Load password into the password field.
 		if def.PasswordField != "" {
 			if pw, err := mw.ctrl.Password(c.ID); err == nil {
@@ -433,30 +703,25 @@ func (mw *MainWindow) showEditor(idx int) {
 }
 
 func (mw *MainWindow) showNewEditor() {
+	mw.phoneRow.SetSelected(false)
 	mw.selectedIdx = len(mw.conns)
 
-	mw.editorTitle.SetText("Add Connection")
+	mw.editorTitle.SetText("New connection")
 	mw.nameEntry.SetText("")
 	mw.pathEntry.SetText("/")
-	mw.autoMountChk.SetChecked(false)
-	mw.autoReconChk.SetChecked(false)
-	mw.cacheSelect.SetSelected(string(store.CacheModeFull))
+	mw.autoMountToggle.SetChecked(false)
+	mw.autoReconToggle.SetChecked(false)
+	mw.cacheSeg.SetSelected(string(store.CacheModeFull))
+	mw.cacheCaptionLbl.SetText(cacheModeCaptions[string(store.CacheModeFull)])
 	mw.testStatusLbl.SetText("")
 	mw.oauthStatusLbl.SetText("")
-	mw.mountBtn.Hide()
+	mw.mountBtnWrap.Hide()
 	mw.deleteBtn.Hide()
 	mw.cacheMaxSizeEntry.SetText("")
 	mw.cacheMaxAgeEntry.SetText("")
 	mw.dirCacheTimeEntry.SetText("")
 	mw.bufferSizeEntry.SetText("")
 	mw.readChunkSizeEntry.SetText("")
-
-	// Default to first provider.
-	if len(Providers) > 0 {
-		def := &Providers[0]
-		mw.providerSel.SetSelected(def.Name)
-		mw.rebuildProviderFields(def, nil)
-	}
 
 	drives := util.FreeDriveLetters()
 	mw.driveSelect.Options = drives
@@ -465,6 +730,14 @@ func (mw *MainWindow) showNewEditor() {
 		mw.driveSelect.SetSelected(drives[0])
 	}
 
+	// Default to the first featured provider, falling back to the full catalog.
+	def := Providers[0]
+	if fp := FeaturedProviders(); len(fp) > 0 {
+		def = *fp[0]
+	}
+	mw.applyProviderSelection(&def, nil)
+	mw.editorSubtitle.SetText(def.Name + "  →  " + mw.driveSelect.Selected + ":")
+
 	mw.saveBtn.OnTapped = func() { mw.saveNew() }
 	mw.cancelBtn.OnTapped = func() { mw.cancelEdit() }
 
@@ -472,7 +745,20 @@ func (mw *MainWindow) showNewEditor() {
 	mw.rightStack.Refresh()
 }
 
+// ShowPhone shows the window with the phone entry selected.
+func (mw *MainWindow) ShowPhone() {
+	mw.Show()
+	mw.list.UnselectAll()
+	mw.selectedIdx = -1
+	mw.phonePanel.Refresh()
+	mw.phoneRow.Update()
+	mw.phoneRow.SetSelected(true)
+	mw.rightStack.Objects = []fyne.CanvasObject{mw.phonePanel.Content()}
+	mw.rightStack.Refresh()
+}
+
 func (mw *MainWindow) cancelEdit() {
+	mw.phoneRow.SetSelected(false)
 	mw.selectedIdx = -1
 	mw.list.UnselectAll()
 	mw.rightStack.Objects = []fyne.CanvasObject{mw.hintContent}
@@ -483,26 +769,31 @@ func (mw *MainWindow) refreshMountBtn(c *store.Connection) {
 	st := mw.ctrl.MountStatus(c.ID)
 	switch st.State {
 	case mount.StateMounted:
+		mw.mountBtn.SetIcon(theme.MediaStopIcon())
 		mw.mountBtn.SetText("Unmount " + c.DriveLetter + ":")
 		mw.mountBtn.Importance = widget.DangerImportance
 		mw.mountBtn.OnTapped = func() { mw.ctrl.RequestUnmount(c.ID) }
-		mw.mountBtn.Show()
+		mw.mountBtn.Enable()
 	case mount.StateMounting, mount.StateUnmounting:
-		mw.mountBtn.SetText("Working...")
+		mw.mountBtn.SetIcon(theme.ViewRefreshIcon())
+		mw.mountBtn.SetText("Working…")
 		mw.mountBtn.Importance = widget.MediumImportance
 		mw.mountBtn.OnTapped = nil
-		mw.mountBtn.Show()
+		mw.mountBtn.Disable()
 	case mount.StateError:
+		mw.mountBtn.SetIcon(theme.MediaPlayIcon())
 		mw.mountBtn.SetText("Retry Mount " + c.DriveLetter + ":")
 		mw.mountBtn.Importance = widget.WarningImportance
 		mw.mountBtn.OnTapped = func() { mw.ctrl.RequestMount(c.ID) }
-		mw.mountBtn.Show()
+		mw.mountBtn.Enable()
 	default:
+		mw.mountBtn.SetIcon(theme.MediaPlayIcon())
 		mw.mountBtn.SetText("Mount " + c.DriveLetter + ":")
 		mw.mountBtn.Importance = widget.SuccessImportance
 		mw.mountBtn.OnTapped = func() { mw.ctrl.RequestMount(c.ID) }
-		mw.mountBtn.Show()
+		mw.mountBtn.Enable()
 	}
+	mw.mountBtnWrap.Show()
 }
 
 // form actions
@@ -551,9 +842,9 @@ func (mw *MainWindow) currentFormConn() *store.Connection {
 		Config:        cfg,
 		DriveLetter:   mw.driveSelect.Selected,
 		RemotePath:    mw.pathEntry.Text,
-		CacheMode:     store.CacheMode(mw.cacheSelect.Selected),
-		AutoMount:     mw.autoMountChk.Checked,
-		AutoReconnect: mw.autoReconChk.Checked,
+		CacheMode:     store.CacheMode(mw.cacheSeg.Selected),
+		AutoMount:     mw.autoMountToggle.Checked,
+		AutoReconnect: mw.autoReconToggle.Checked,
 		CacheMaxSize:  strings.TrimSpace(mw.cacheMaxSizeEntry.Text),
 		CacheMaxAge:   strings.TrimSpace(mw.cacheMaxAgeEntry.Text),
 		DirCacheTime:  strings.TrimSpace(mw.dirCacheTimeEntry.Text),
@@ -660,8 +951,7 @@ func (mw *MainWindow) saveNew() {
 		return
 	}
 	mw.ctrl.OnSettingsChange()
-	mw.conns = mw.ctrl.Connections()
-	mw.list.Refresh()
+	mw.applyFilter()
 	mw.cancelEdit()
 }
 
@@ -676,8 +966,7 @@ func (mw *MainWindow) saveEdit() {
 		return
 	}
 	mw.ctrl.OnSettingsChange()
-	mw.conns = mw.ctrl.Connections()
-	mw.list.Refresh()
+	mw.applyFilter()
 	mw.cancelEdit()
 }
 
@@ -698,8 +987,7 @@ func (mw *MainWindow) deleteEdit() {
 				return
 			}
 			mw.ctrl.OnSettingsChange()
-			mw.conns = mw.ctrl.Connections()
-			mw.list.Refresh()
+			mw.applyFilter()
 			mw.cancelEdit()
 		},
 		mw.win,
@@ -797,8 +1085,7 @@ func (mw *MainWindow) doOAuthAuthorize() {
 			}
 			mw.oauthStatusLbl.SetText("Authorized")
 			mw.ctrl.OnSettingsChange()
-			mw.conns = mw.ctrl.Connections()
-			mw.list.Refresh()
+			mw.applyFilter()
 			for i, c := range mw.conns {
 				if c.ID == connID {
 					mw.showEditor(i)
@@ -812,16 +1099,38 @@ func (mw *MainWindow) doOAuthAuthorize() {
 
 // helpers
 
-
-func statusDot(s mount.State) string {
+func statusColor(s mount.State) color.Color {
 	switch s {
 	case mount.StateMounted:
-		return "[M]"
+		return theme.Color(theme.ColorNameSuccess)
 	case mount.StateMounting, mount.StateUnmounting:
-		return "[...]"
+		return theme.Color(theme.ColorNameWarning)
 	case mount.StateError:
-		return "[X]"
+		return theme.Color(theme.ColorNameError)
 	default:
-		return "[ ]"
+		return theme.Color(theme.ColorNameDisabled)
 	}
+}
+
+// providerUIType resolves the UI provider type for a connection, preferring
+// the stored _uiType hint and falling back to the raw rclone provider.
+func providerUIType(c *store.Connection) string {
+	if t := c.Config[store.ConfigKeyUIType]; t != "" {
+		return t
+	}
+	return c.Provider
+}
+
+// providerForConn resolves a connection's ProviderDef, or nil if unknown.
+func providerForConn(c *store.Connection) *ProviderDef {
+	return FindProvider(providerUIType(c))
+}
+
+// providerDisplayName resolves the friendly provider name shown in the
+// connection's UI type (falling back to the raw rclone provider string).
+func providerDisplayName(c *store.Connection) string {
+	if def := providerForConn(c); def != nil {
+		return def.Name
+	}
+	return c.Provider
 }

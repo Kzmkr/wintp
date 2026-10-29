@@ -11,6 +11,9 @@
 # Output of the go coverage tool
 *.out
 
+# Runtime logs written next to the dev binary
+*.log
+
 # Build and distribution artifacts
 /build/
 /dist/

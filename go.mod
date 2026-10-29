@@ -6,7 +6,9 @@ require (
 	fyne.io/fyne/v2 v2.7.4
 	github.com/danieljoos/wincred v1.2.3
 	github.com/google/uuid v1.6.0
+	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	golang.org/x/crypto v0.53.0
+	golang.org/x/net v0.55.0
 	golang.org/x/sys v0.46.0
 )
 
@@ -41,7 +43,6 @@ require (
 	github.com/stretchr/testify v1.11.1 // indirect
 	github.com/yuin/goldmark v1.7.8 // indirect
 	golang.org/x/image v0.43.0 // indirect
-	golang.org/x/net v0.55.0 // indirect
 	golang.org/x/text v0.38.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

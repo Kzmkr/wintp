@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -14,8 +15,10 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
+	"golang.org/x/sys/windows"
 
 	"wintp/internal/cred"
+	"wintp/internal/link"
 	"wintp/internal/mount"
 	rcloneSvc "wintp/internal/rclone"
 	"wintp/internal/singleinstance"
@@ -37,6 +40,7 @@ func main() {
 
 	a := app.New()
 	a.SetIcon(nil) // updated after tray initializes
+	ui.ApplyTheme(a)
 
 	// App data directory.
 	appDir := filepath.Join(os.Getenv("APPDATA"), "wintp")
@@ -50,6 +54,13 @@ func main() {
 	}
 
 	log.Printf("wintp starting - appDir=%s log=%s", appDir, logPath)
+
+	if windows.GetCurrentProcessToken().IsElevated() {
+		log.Printf("WARNING: wintp is running elevated (as administrator). " +
+			"Mounted drives will only be visible inside this elevated session - " +
+			"they will not show up in a normal Explorer window or other apps. " +
+			"Run wintp without 'Run as administrator' to avoid this.")
+	}
 
 	// Locate rclone.
 	rcloneBin, err := util.FindRclone()
@@ -92,14 +103,16 @@ func main() {
 	}
 
 	coord.SyncRemotes()
+	coord.initLink()
 
 	// Build tray (sets up the system tray menu).
 	t := tray.New(a, coord)
 	coord.tray = t
 
-	// Build the single persistent window (hidden until user opens settings).
+	// Build the single persistent window and show it on startup.
 	mainWin := ui.OpenMainWindow(a, coord)
 	coord.mainWin = mainWin
+	mainWin.Show()
 
 	sv.OnStatusChange = func(connID string, s mount.Status) {
 		coord.tray.Rebuild()
@@ -122,6 +135,9 @@ func main() {
 	a.Run()
 
 	// Clean shutdown.
+	if coord.link != nil {
+		coord.link.Stop()
+	}
 	sv.UnmountAll()
 }
 
@@ -160,6 +176,9 @@ type coordinator struct {
 	mainWin   *ui.MainWindow
 	rcloneBin string
 	appDir    string
+
+	link        *link.Server
+	linkRunning atomic.Bool
 }
 
 // tray.Controller implementation

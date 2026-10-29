@@ -1,6 +1,10 @@
 package ui
 
-import "wintp/internal/store"
+import (
+	"strings"
+
+	"wintp/internal/store"
+)
 
 // FormField describes one input in the provider-specific form.
 type FormField struct {
@@ -10,6 +14,11 @@ type FormField struct {
 	Default     string
 	IsPassword  bool
 	Optional    bool
+	// Row groups short fields (e.g. host + port) onto one horizontal line
+	// instead of each taking a full-width row. Fields sharing the same
+	// non-empty Row value, and appearing consecutively in Fields, are laid
+	// out side by side. Leave empty for a normal full-width field.
+	Row string
 }
 
 // ProviderDef describes how to build the UI for one rclone provider.
@@ -17,12 +26,90 @@ type ProviderDef struct {
 	Type          string            // stored in Connection.Config[store.ConfigKeyUIType] and used for lookup
 	RcloneType    string            // actual rclone remote type (may differ, e.g. "ftps""ftp")
 	Name          string            // display name in the provider dropdown
+	Subtitle      string            // short hint shown under Name in the provider picker card ("" if not a featured provider)
 	Group         string            // visual grouping label
 	Fields        []FormField       // form fields shown in the editor
 	PresetConfig  map[string]string // extra Config keys written automatically (hidden from UI)
 	IsOAuth       bool              // uses browser OAuth; no password field
 	PassEnvSuffix string            // RCLONE_CONFIG_*_<suffix> env-var for password; "" for OAuth
 	PasswordField string            // Field.Key whose value goes to Windows Credential Manager
+}
+
+// featuredProviderTypes lists the Type values shown as quick-pick cards at
+// the top of the provider picker, in display order. Every other provider
+// remains reachable through the "More providers" dropdown.
+var featuredProviderTypes = []string{"ftp", "sftp", "webdav", "s3-aws", "gdrive", "onedrive"}
+
+// featuredSubtitles gives each featured provider its one-line hint.
+var featuredSubtitles = map[string]string{
+	"ftp":      "Classic file server",
+	"sftp":     "Over SSH",
+	"webdav":   "Nextcloud, NAS",
+	"s3-aws":   "AWS, R2, MinIO",
+	"gdrive":   "Sign in with Google",
+	"onedrive": "Sign in with Microsoft",
+}
+
+// FeaturedProviders returns the curated provider list for the picker's card
+// grid, in display order.
+func FeaturedProviders() []*ProviderDef {
+	out := make([]*ProviderDef, 0, len(featuredProviderTypes))
+	for _, t := range featuredProviderTypes {
+		if def := FindProvider(t); def != nil {
+			out = append(out, def)
+		}
+	}
+	return out
+}
+
+// badgeShortNames maps a provider Type to the short code shown in the
+// connection list's avatar badge. Providers not listed here fall back to an
+// algorithmic abbreviation (see badgeFor).
+var badgeShortNames = map[string]string{
+	"ftp": "FTP", "ftps": "FTPS", "sftp": "SFTP",
+	"webdav": "WD", "nextcloud": "NC", "owncloud": "OC",
+	"smb": "SMB", "rsyncnet": "RSY", "http": "HTTP",
+	"gdrive": "GD", "gcs": "GCS", "onedrive": "OD",
+	"azureblob": "AZB", "azurefiles": "AZF", "dropbox": "DBX",
+	"mega": "MEGA", "seafile": "SF", "b2": "B2",
+	"koofr": "KOO", "storj": "STJ", "internetarchive": "IA",
+	"swift": "SWF", "hdfs": "HDFS", "sia": "SIA", "local": "LOC",
+}
+
+// badgeFor returns the short (2-4 char) code shown in a connection's avatar
+// badge in the sidebar list.
+func badgeFor(def *ProviderDef) string {
+	if def == nil {
+		return "?"
+	}
+	if strings.HasPrefix(def.Type, "s3") {
+		return "S3"
+	}
+	if code, ok := badgeShortNames[def.Type]; ok {
+		return code
+	}
+	// Fallback: initials of capitalised words in the display name.
+	var letters []rune
+	for _, w := range strings.Fields(def.Name) {
+		r := []rune(w)
+		if len(r) == 0 {
+			continue
+		}
+		if r[0] >= 'A' && r[0] <= 'Z' {
+			letters = append(letters, r[0])
+			if len(letters) == 4 {
+				break
+			}
+		}
+	}
+	if len(letters) > 0 {
+		return string(letters)
+	}
+	t := strings.ToUpper(def.Type)
+	if len(t) > 4 {
+		t = t[:4]
+	}
+	return t
 }
 
 // ProviderGroups lists the display order of groups.
@@ -38,15 +125,23 @@ var ProviderGroups = []string{
 // Providers is the full catalog.  All entries with the same Group are shown together.
 var Providers = buildProviders()
 
+func init() {
+	for i := range Providers {
+		if s, ok := featuredSubtitles[Providers[i].Type]; ok {
+			Providers[i].Subtitle = s
+		}
+	}
+}
+
 func buildProviders() []ProviderDef {
 	//  shared field sets
 
 	serverFields := func(defaultPort string) []FormField {
 		return []FormField{
-			{Key: "host", Label: "Host", Placeholder: "hostname or IP"},
-			{Key: "port", Label: "Port", Placeholder: defaultPort, Default: defaultPort},
-			{Key: "user", Label: "Username", Placeholder: "username"},
-			{Key: "pass", Label: "Password", IsPassword: true, Optional: true},
+			{Key: "host", Label: "Host", Placeholder: "hostname or IP", Row: "loc"},
+			{Key: "port", Label: "Port", Placeholder: defaultPort, Default: defaultPort, Row: "loc"},
+			{Key: "user", Label: "Username", Placeholder: "username", Row: "auth"},
+			{Key: "pass", Label: "Password", IsPassword: true, Optional: true, Row: "auth"},
 		}
 	}
 
@@ -55,8 +150,8 @@ func buildProviders() []ProviderDef {
 		return []FormField{
 			{Key: "access_key_id", Label: "Access Key ID", Placeholder: "AKIA"},
 			{Key: "secret_access_key", Label: "Secret Access Key", IsPassword: true},
-			{Key: "region", Label: "Region", Placeholder: regionHint, Optional: true},
-			{Key: "endpoint", Label: "Endpoint URL", Placeholder: endpointHint, Optional: endpointOptional},
+			{Key: "region", Label: "Region", Placeholder: regionHint, Optional: true, Row: "loc"},
+			{Key: "endpoint", Label: "Endpoint URL", Placeholder: endpointHint, Optional: endpointOptional, Row: "loc"},
 		}
 	}
 
@@ -122,8 +217,8 @@ func buildProviders() []ProviderDef {
 			Fields: []FormField{
 				{Key: "url", Label: "URL", Placeholder: "https://dav.example.com"},
 				{Key: "vendor", Label: "Vendor", Placeholder: "other", Default: "other"},
-				{Key: "user", Label: "Username", Placeholder: "username"},
-				{Key: "pass", Label: "Password", IsPassword: true, Optional: true},
+				{Key: "user", Label: "Username", Placeholder: "username", Row: "auth"},
+				{Key: "pass", Label: "Password", IsPassword: true, Optional: true, Row: "auth"},
 			},
 			PresetConfig:  map[string]string{store.ConfigKeyPassEnv: "PASS"},
 			PassEnvSuffix: "PASS", PasswordField: "pass",
@@ -132,8 +227,8 @@ func buildProviders() []ProviderDef {
 			Type: "nextcloud", RcloneType: "webdav", Name: "Nextcloud", Group: "File Transfer",
 			Fields: []FormField{
 				{Key: "url", Label: "Server URL", Placeholder: "https://cloud.example.com/remote.php/dav/files/USER"},
-				{Key: "user", Label: "Username", Placeholder: "username"},
-				{Key: "pass", Label: "Password", IsPassword: true, Optional: true},
+				{Key: "user", Label: "Username", Placeholder: "username", Row: "auth"},
+				{Key: "pass", Label: "Password", IsPassword: true, Optional: true, Row: "auth"},
 			},
 			PresetConfig:  map[string]string{"vendor": "nextcloud", store.ConfigKeyPassEnv: "PASS"},
 			PassEnvSuffix: "PASS", PasswordField: "pass",
@@ -142,8 +237,8 @@ func buildProviders() []ProviderDef {
 			Type: "owncloud", RcloneType: "webdav", Name: "ownCloud", Group: "File Transfer",
 			Fields: []FormField{
 				{Key: "url", Label: "Server URL", Placeholder: "https://cloud.example.com/remote.php/webdav"},
-				{Key: "user", Label: "Username", Placeholder: "username"},
-				{Key: "pass", Label: "Password", IsPassword: true, Optional: true},
+				{Key: "user", Label: "Username", Placeholder: "username", Row: "auth"},
+				{Key: "pass", Label: "Password", IsPassword: true, Optional: true, Row: "auth"},
 			},
 			PresetConfig:  map[string]string{"vendor": "owncloud", store.ConfigKeyPassEnv: "PASS"},
 			PassEnvSuffix: "PASS", PasswordField: "pass",
@@ -151,10 +246,10 @@ func buildProviders() []ProviderDef {
 		{
 			Type: "smb", RcloneType: "smb", Name: "SMB / CIFS (Windows Share)", Group: "File Transfer",
 			Fields: []FormField{
-				{Key: "host", Label: "Host", Placeholder: "server or IP"},
-				{Key: "port", Label: "Port", Placeholder: "445", Default: "445"},
-				{Key: "user", Label: "Username", Placeholder: "username"},
-				{Key: "pass", Label: "Password", IsPassword: true, Optional: true},
+				{Key: "host", Label: "Host", Placeholder: "server or IP", Row: "loc"},
+				{Key: "port", Label: "Port", Placeholder: "445", Default: "445", Row: "loc"},
+				{Key: "user", Label: "Username", Placeholder: "username", Row: "auth"},
+				{Key: "pass", Label: "Password", IsPassword: true, Optional: true, Row: "auth"},
 				{Key: "domain", Label: "Domain", Placeholder: "WORKGROUP", Optional: true},
 			},
 			PresetConfig:  map[string]string{store.ConfigKeyPassEnv: "PASS"},
@@ -163,10 +258,10 @@ func buildProviders() []ProviderDef {
 		{
 			Type: "rsyncnet", RcloneType: "sftp", Name: "rsync.net", Group: "File Transfer",
 			Fields: []FormField{
-				{Key: "host", Label: "Host", Placeholder: "usw-s01.rsync.net"},
-				{Key: "port", Label: "Port", Placeholder: "22", Default: "22"},
-				{Key: "user", Label: "Username (account ID)", Placeholder: "12345"},
-				{Key: "pass", Label: "Password", IsPassword: true, Optional: true},
+				{Key: "host", Label: "Host", Placeholder: "usw-s01.rsync.net", Row: "loc"},
+				{Key: "port", Label: "Port", Placeholder: "22", Default: "22", Row: "loc"},
+				{Key: "user", Label: "Username (account ID)", Placeholder: "12345", Row: "auth"},
+				{Key: "pass", Label: "Password", IsPassword: true, Optional: true, Row: "auth"},
 				{Key: "key_file", Label: "SSH Key File", Optional: true},
 			},
 			PresetConfig:  map[string]string{store.ConfigKeyPassEnv: "PASS"},
@@ -260,8 +355,8 @@ func buildProviders() []ProviderDef {
 		{
 			Type: "azurefiles", RcloneType: "azurefiles", Name: "Azure Files Storage", Group: "Microsoft",
 			Fields: []FormField{
-				{Key: "account", Label: "Storage Account", Placeholder: "mystorageaccount"},
-				{Key: "key", Label: "Account Key", IsPassword: true, Optional: true},
+				{Key: "account", Label: "Storage Account", Placeholder: "mystorageaccount", Row: "auth"},
+				{Key: "key", Label: "Account Key", IsPassword: true, Optional: true, Row: "auth"},
 			},
 			PresetConfig:  map[string]string{store.ConfigKeyPassEnv: "KEY"},
 			PassEnvSuffix: "KEY", PasswordField: "key",
@@ -285,8 +380,8 @@ func buildProviders() []ProviderDef {
 		{
 			Type: "mega", RcloneType: "mega", Name: "MEGA", Group: "Other Cloud",
 			Fields: []FormField{
-				{Key: "user", Label: "Email", Placeholder: "user@example.com"},
-				{Key: "pass", Label: "Password", IsPassword: true},
+				{Key: "user", Label: "Email", Placeholder: "user@example.com", Row: "auth"},
+				{Key: "pass", Label: "Password", IsPassword: true, Row: "auth"},
 			},
 			PresetConfig:  map[string]string{store.ConfigKeyPassEnv: "PASS"},
 			PassEnvSuffix: "PASS", PasswordField: "pass",
@@ -295,8 +390,8 @@ func buildProviders() []ProviderDef {
 			Type: "seafile", RcloneType: "seafile", Name: "Seafile", Group: "Other Cloud",
 			Fields: []FormField{
 				{Key: "url", Label: "Server URL", Placeholder: "https://seafile.example.com"},
-				{Key: "user", Label: "Email", Placeholder: "user@example.com"},
-				{Key: "pass", Label: "Password", IsPassword: true},
+				{Key: "user", Label: "Email", Placeholder: "user@example.com", Row: "auth"},
+				{Key: "pass", Label: "Password", IsPassword: true, Row: "auth"},
 				{Key: "library", Label: "Library Name", Optional: true},
 			},
 			PresetConfig:  map[string]string{store.ConfigKeyPassEnv: "PASS"},
@@ -308,8 +403,8 @@ func buildProviders() []ProviderDef {
 		{
 			Type: "b2", RcloneType: "b2", Name: "Backblaze B2 (Native)", Group: "More",
 			Fields: []FormField{
-				{Key: "account", Label: "Account ID", Placeholder: "your-b2-account-id"},
-				{Key: "key", Label: "Application Key", IsPassword: true},
+				{Key: "account", Label: "Account ID", Placeholder: "your-b2-account-id", Row: "auth"},
+				{Key: "key", Label: "Application Key", IsPassword: true, Row: "auth"},
 			},
 			PresetConfig:  map[string]string{store.ConfigKeyPassEnv: "KEY"},
 			PassEnvSuffix: "KEY", PasswordField: "key",
@@ -317,8 +412,8 @@ func buildProviders() []ProviderDef {
 		{
 			Type: "koofr", RcloneType: "koofr", Name: "Koofr", Group: "More",
 			Fields: []FormField{
-				{Key: "user", Label: "Email", Placeholder: "user@example.com"},
-				{Key: "password", Label: "Password / App Password", IsPassword: true},
+				{Key: "user", Label: "Email", Placeholder: "user@example.com", Row: "auth"},
+				{Key: "password", Label: "Password / App Password", IsPassword: true, Row: "auth"},
 				{Key: "provider", Label: "Provider", Placeholder: "koofr", Default: "koofr", Optional: true},
 			},
 			PresetConfig:  map[string]string{store.ConfigKeyPassEnv: "PASSWORD"},
@@ -337,8 +432,8 @@ func buildProviders() []ProviderDef {
 		{
 			Type: "internetarchive", RcloneType: "internetarchive", Name: "Internet Archive", Group: "More",
 			Fields: []FormField{
-				{Key: "access_key_id", Label: "Access Key ID"},
-				{Key: "secret_access_key", Label: "Secret Access Key", IsPassword: true},
+				{Key: "access_key_id", Label: "Access Key ID", Row: "auth"},
+				{Key: "secret_access_key", Label: "Secret Access Key", IsPassword: true, Row: "auth"},
 			},
 			PresetConfig:  map[string]string{store.ConfigKeyPassEnv: "SECRET_ACCESS_KEY"},
 			PassEnvSuffix: "SECRET_ACCESS_KEY", PasswordField: "secret_access_key",
@@ -346,8 +441,8 @@ func buildProviders() []ProviderDef {
 		{
 			Type: "swift", RcloneType: "swift", Name: "OpenStack Swift", Group: "More",
 			Fields: []FormField{
-				{Key: "user", Label: "Username"},
-				{Key: "key", Label: "API Key / Password", IsPassword: true},
+				{Key: "user", Label: "Username", Row: "auth"},
+				{Key: "key", Label: "API Key / Password", IsPassword: true, Row: "auth"},
 				{Key: "auth", Label: "Auth URL", Placeholder: "https://auth.cloud.ovh.net/v3"},
 				{Key: "tenant", Label: "Tenant / Project", Optional: true},
 				{Key: "region", Label: "Region", Optional: true},

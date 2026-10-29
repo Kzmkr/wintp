@@ -148,6 +148,10 @@ func (m *Mount) Start() error {
 		return fmt.Errorf("start rclone: %w", err)
 	}
 
+	if err := proc.AssignToKillJob(cmd); err != nil {
+		log.Printf("[%s] warning: mount process won't be auto-killed with wintp: %v", m.conn.Name, err)
+	}
+
 	m.mu.Lock()
 	m.cmd = cmd
 	m.mu.Unlock()
@@ -219,6 +223,12 @@ func (m *Mount) Start() error {
 	return nil
 }
 
+// MountArgs deliberately omits rclone's --network-mode: it registers the
+// drive through the Windows network-provider (WNetAddConnection), which is
+// scoped to the caller's logon session. If wintp is ever run elevated, the
+// mount becomes invisible to the normal desktop session - it "connects" but
+// never shows up in Explorer. The default WinFsp disk mode mounts a real
+// local drive letter, which has no such session scoping.
 func MountArgs(conn *store.Connection, rcloneConf string) []string {
 	remote := store.RemoteName(conn.ID) + ":" + conn.RemotePath
 	target := conn.DriveLetter + ":"
@@ -226,7 +236,6 @@ func MountArgs(conn *store.Connection, rcloneConf string) []string {
 		"mount", remote, target,
 		"--config", rcloneConf,
 		"--vfs-cache-mode", string(conn.CacheMode),
-		"--network-mode",
 		"--volname", conn.Name,
 		"--log-level", "INFO",
 		"--use-json-log",
