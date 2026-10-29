@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"os"
 	"os/exec"
@@ -241,6 +242,7 @@ func MountArgs(conn *store.Connection, rcloneConf string) []string {
 		"--use-json-log",
 		"--no-console",
 	}
+	args = append(args, VolumeIdentityArgs(conn.ID)...)
 	if conn.CacheMaxSize != "" {
 		args = append(args, "--vfs-cache-max-size", conn.CacheMaxSize)
 	}
@@ -257,6 +259,24 @@ func MountArgs(conn *store.Connection, rcloneConf string) []string {
 		args = append(args, "--vfs-read-chunk-size", conn.ReadChunkSize)
 	}
 	return args
+}
+
+// volumeCreationTime is a fixed FILETIME (2024-01-01) reported for every
+// wintp volume; together with the serial it identifies the volume.
+const volumeCreationTime = 133485408000000000
+
+// VolumeIdentityArgs pins the WinFsp volume serial number (derived from the
+// connection ID) and creation time. By default WinFsp picks a new serial on
+// every mount, and Windows keys its thumbnail cache on the volume, so every
+// reconnect would make Explorer rebuild every thumbnail by reading whole
+// files over the network. With a stable identity they are built once.
+func VolumeIdentityArgs(connID string) []string {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(connID))
+	return []string{
+		"-o", fmt.Sprintf("VolumeSerialNumber=%08x", h.Sum32()),
+		"-o", fmt.Sprintf("VolumeCreationTime=%d", volumeCreationTime),
+	}
 }
 
 // Stop cleanly shuts down the rclone mount. It is safe to call multiple times.
@@ -396,6 +416,10 @@ func TestConnection(rcloneBin, rcloneConf, knownHostsFile string, conn *store.Co
 	}
 	return nil
 }
+
+// Env returns the environment for any rclone command that uses conn's
+// remote, with its stored password injected.
+func Env(rcloneBin string, conn *store.Connection) []string { return buildEnv(rcloneBin, conn) }
 
 // buildEnv builds the environment for a mount command using the stored password.
 func buildEnv(rcloneBin string, conn *store.Connection) []string {

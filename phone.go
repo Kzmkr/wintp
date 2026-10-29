@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 
 	"fyne.io/fyne/v2"
 	"golang.org/x/sys/windows"
@@ -18,6 +19,7 @@ import (
 	"wintp/internal/radio"
 	rcloneSvc "wintp/internal/rclone"
 	"wintp/internal/store"
+	"wintp/internal/thumbs"
 	"wintp/internal/ui"
 )
 
@@ -150,8 +152,50 @@ func (c *coordinator) PhoneDrive() ui.PhoneDriveInfo {
 		info.Letter = conn.DriveLetter
 		info.AutoMount = conn.AutoMount
 		info.State = c.sv.MountStatus(phoneDriveID).State
+		info.Thumbs = conn.Config[store.ConfigKeyThumbs] != "false"
 	}
+	st := c.thumbs.Status()
+	info.ThumbsRunning, info.ThumbsScanned = st.Running, st.Scanned
+	info.ThumbsTotal, info.ThumbsReady, info.ThumbsFailed = st.Total, st.Ready, st.Failed
 	return info
+}
+
+func (c *coordinator) initThumbs() {
+	c.thumbs = thumbs.New()
+	c.thumbs.OnChange = func() {
+		if c.mainWin != nil {
+			c.mainWin.Refresh()
+		}
+	}
+}
+
+// syncThumbs runs thumbnail pre-loading exactly while the phone drive is
+// mounted and the feature is on. Safe from any goroutine; Stop waits for
+// in-flight thumbnails, so the work happens off the caller's goroutine.
+func (c *coordinator) syncThumbs() {
+	go func() {
+		conn, ok := c.store.Get(phoneDriveID)
+		if ok && conn.Config[store.ConfigKeyThumbs] != "false" &&
+			c.sv.MountStatus(phoneDriveID).State == mount.StateMounted {
+			c.thumbs.Start(conn.DriveLetter + `:\`)
+			return
+		}
+		c.thumbs.Stop()
+	}()
+}
+
+// SetPhoneThumbs turns thumbnail pre-loading for the phone drive on or off.
+func (c *coordinator) SetPhoneThumbs(on bool) error {
+	conn, ok := c.store.Get(phoneDriveID)
+	if !ok {
+		return errors.New("set up the phone drive first")
+	}
+	conn.Config[store.ConfigKeyThumbs] = strconv.FormatBool(on)
+	if err := c.store.Update(conn); err != nil {
+		return err
+	}
+	c.syncThumbs()
+	return nil
 }
 
 // MountPhoneDrive creates or updates the phone drive connection and mounts it.
@@ -170,6 +214,10 @@ func (c *coordinator) MountPhoneDrive(letter string, autoMount bool) error {
 		AutoReconnect: true,
 	}
 	conn.Config[store.ConfigKeyUIType] = "webdav"
+	conn.Config[store.ConfigKeyThumbs] = "true"
+	if old, ok := c.store.Get(phoneDriveID); ok && old.Config[store.ConfigKeyThumbs] != "" {
+		conn.Config[store.ConfigKeyThumbs] = old.Config[store.ConfigKeyThumbs]
+	}
 	// rclone expects the webdav password obscured; plain text there makes every
 	// request fail with 401 (shown in Explorer as an I/O error).
 	obscured := rcloneSvc.ObscurePassword(context.Background(), nil, c.rcloneBin, conn.Config["pass"])

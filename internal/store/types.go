@@ -13,6 +13,7 @@ const (
 	ConfigKeyUIType  = "_uiType"
 	ConfigKeyPassEnv = "_passenv"
 	ConfigKeyOAuth   = "_oauth"
+	ConfigKeyThumbs  = "_thumbs" // phone drive: "false" turns off thumbnail pre-loading
 )
 
 // Connection stores everything needed to create and mount an rclone remote.

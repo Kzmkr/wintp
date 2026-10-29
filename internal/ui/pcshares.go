@@ -32,16 +32,20 @@ func pcSharesCard(ctrl PhoneController, win fyne.Window) fyne.CanvasObject {
 		}
 		for i := range shares {
 			i := i
-			name := widget.NewLabelWithStyle(shares[i].Name, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+			name := newText(shares[i].Name, 13, colText, true)
 			path := widget.NewLabel(shares[i].Path)
 			path.Importance = widget.LowImportance
 			path.Truncation = fyne.TextTruncateEllipsis
+			path.SizeName = theme.SizeNameCaptionText
 			rm := widget.NewButtonWithIcon("", theme.DeleteIcon(), func() {
 				shares = append(shares[:i], shares[i+1:]...)
 				save()
 				rebuild()
 			})
-			list.Add(container.NewBorder(nil, nil, nil, rm, container.NewVBox(name, path)))
+			rm.Importance = widget.LowImportance
+			list.Add(container.NewBorder(nil, nil,
+				inset(0, 0, 0, 10, container.NewCenter(widget.NewIcon(theme.FolderIcon()))),
+				container.NewCenter(rm), vbox(3, name, unpadded(path))))
 		}
 		list.Refresh()
 	}
@@ -64,10 +68,9 @@ func pcSharesCard(ctrl PhoneController, win fyne.Window) fyne.CanvasObject {
 		}, win).Show()
 	})
 
-	return widget.NewCard("", "", container.NewVBox(
-		sectionHeading("PC folders on the phone",
-			"Paired phones can browse these folders and open or save their files. Read-only; nothing else on the PC is visible."),
+	return card("PC folders on the phone",
+		"Paired phones can browse these folders and open or save their files. Read-only; nothing else on the PC is visible.",
 		list,
 		container.NewHBox(add),
-	))
+	)
 }

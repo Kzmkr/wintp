@@ -123,12 +123,11 @@ func openRulesCard(ctrl PhoneController, win fyne.Window) fyne.CanvasObject {
 	})
 	save.Importance = widget.HighImportance
 
-	return widget.NewCard("", "", container.NewVBox(
-		sectionHeading("Open received files",
-			"Files sent from the phone open automatically with the program set for their type. Types with no rule are only saved."),
+	return card("Open received files",
+		"Files sent from the phone open automatically with the program set for their type. Types with no rule are only saved.",
 		list,
 		container.NewHBox(add, vlc, save),
-	))
+	)
 }
 
 // exeFilter shows programs and shortcuts in the file picker.
@@ -138,4 +137,3 @@ func (exeFilter) Matches(u fyne.URI) bool {
 	e := strings.ToLower(u.Extension())
 	return e == ".exe" || e == ".bat" || e == ".cmd"
 }
-

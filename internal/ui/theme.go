@@ -7,8 +7,34 @@ import (
 	"fyne.io/fyne/v2/theme"
 )
 
-// darkTheme is a near-black, blue-accented theme used for the wintp
-// settings window instead of Fyne's default light/dark palette.
+// Palette for wintp's dark theme: layered zinc neutrals (window < sidebar <
+// card < input) with a single indigo accent, in the style of modern desktop
+// tools. Widgets that draw their own chrome use these directly.
+var (
+	colBackground = color.NRGBA{R: 0x0e, G: 0x0f, B: 0x11, A: 0xff} // content area
+	colSidebar    = color.NRGBA{R: 0x13, G: 0x14, B: 0x17, A: 0xff}
+	colCard       = color.NRGBA{R: 0x17, G: 0x18, B: 0x1c, A: 0xff}
+	colInput      = color.NRGBA{R: 0x1e, G: 0x1f, B: 0x24, A: 0xff}
+	colBorder     = color.NRGBA{R: 0x26, G: 0x27, B: 0x2d, A: 0xff}
+	colBorderHi   = color.NRGBA{R: 0x34, G: 0x35, B: 0x3d, A: 0xff}
+	colText       = color.NRGBA{R: 0xec, G: 0xec, B: 0xef, A: 0xff}
+	colMuted      = color.NRGBA{R: 0x8b, G: 0x8d, B: 0x98, A: 0xff}
+	colFaint      = color.NRGBA{R: 0x6e, G: 0x71, B: 0x7c, A: 0xff}
+	colAccent     = color.NRGBA{R: 0x63, G: 0x66, B: 0xf1, A: 0xff}
+	colAccentSoft = color.NRGBA{R: 0x63, G: 0x66, B: 0xf1, A: 0x2e}
+	colSuccess    = color.NRGBA{R: 0x22, G: 0xc5, B: 0x5e, A: 0xff}
+	colWarning    = color.NRGBA{R: 0xf5, G: 0x9e, B: 0x0b, A: 0xff}
+	colError      = color.NRGBA{R: 0xef, G: 0x44, B: 0x44, A: 0xff}
+)
+
+// withAlpha returns c with its alpha replaced, for tinted backgrounds.
+func withAlpha(c color.Color, a uint8) color.NRGBA {
+	n := color.NRGBAModel.Convert(c).(color.NRGBA)
+	n.A = a
+	return n
+}
+
+// darkTheme is the wintp settings window theme.
 type darkTheme struct{}
 
 var _ fyne.Theme = (*darkTheme)(nil)
@@ -16,44 +42,50 @@ var _ fyne.Theme = (*darkTheme)(nil)
 func (darkTheme) Color(name fyne.ThemeColorName, _ fyne.ThemeVariant) color.Color {
 	switch name {
 	case theme.ColorNameBackground:
-		return color.NRGBA{R: 0x0d, G: 0x0d, B: 0x0f, A: 0xff}
+		return colBackground
 	case theme.ColorNameForeground:
-		return color.NRGBA{R: 0xf2, G: 0xf2, B: 0xf3, A: 0xff}
-	case theme.ColorNameButton, theme.ColorNameInputBackground:
-		return color.NRGBA{R: 0x17, G: 0x17, B: 0x1a, A: 0xff}
+		return colText
+	case theme.ColorNameButton:
+		return colInput
+	case theme.ColorNameInputBackground:
+		return colInput
 	case theme.ColorNameDisabledButton:
-		return color.NRGBA{R: 0x1d, G: 0x1d, B: 0x20, A: 0xff}
-	case theme.ColorNameInputBorder, theme.ColorNameSeparator:
-		return color.NRGBA{R: 0x2a, G: 0x2a, B: 0x2e, A: 0xff}
+		return colCard
+	case theme.ColorNameInputBorder:
+		return colBorderHi
+	case theme.ColorNameSeparator:
+		return colBorder
 	case theme.ColorNamePrimary, theme.ColorNameFocus:
-		return color.NRGBA{R: 0x3b, G: 0x82, B: 0xf6, A: 0xff}
-	case theme.ColorNameHover, theme.ColorNamePressed:
-		return color.NRGBA{R: 0x22, G: 0x22, B: 0x26, A: 0xff}
+		return colAccent
+	case theme.ColorNameHover:
+		return color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0x0c}
+	case theme.ColorNamePressed:
+		return color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0x16}
 	case theme.ColorNameDisabled:
-		return color.NRGBA{R: 0x55, G: 0x55, B: 0x5c, A: 0xff}
+		return colFaint
 	case theme.ColorNamePlaceHolder:
-		return color.NRGBA{R: 0x6b, G: 0x6b, B: 0x70, A: 0xff}
+		return colFaint
 	case theme.ColorNameSuccess:
-		return color.NRGBA{R: 0x22, G: 0xc5, B: 0x5e, A: 0xff}
+		return colSuccess
 	case theme.ColorNameWarning:
-		return color.NRGBA{R: 0xf5, G: 0x9e, B: 0x0b, A: 0xff}
+		return colWarning
 	case theme.ColorNameError:
-		return color.NRGBA{R: 0xef, G: 0x44, B: 0x44, A: 0xff}
+		return colError
 	case theme.ColorNameForegroundOnPrimary, theme.ColorNameForegroundOnError,
 		theme.ColorNameForegroundOnSuccess, theme.ColorNameForegroundOnWarning:
-		return color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}
+		return color.White
 	case theme.ColorNameHeaderBackground, theme.ColorNameMenuBackground, theme.ColorNameOverlayBackground:
-		return color.NRGBA{R: 0x15, G: 0x15, B: 0x17, A: 0xff}
+		return colCard
 	case theme.ColorNameScrollBar:
-		return color.NRGBA{R: 0x3a, G: 0x3a, B: 0x3e, A: 0xaa}
+		return color.NRGBA{R: 0xff, G: 0xff, B: 0xff, A: 0x22}
 	case theme.ColorNameScrollBarBackground:
 		return color.Transparent
 	case theme.ColorNameSelection:
-		return color.NRGBA{R: 0x3b, G: 0x82, B: 0xf6, A: 0x55}
+		return colAccentSoft
 	case theme.ColorNameShadow:
-		return color.NRGBA{A: 0x66}
+		return color.NRGBA{A: 0x88}
 	case theme.ColorNameHyperlink:
-		return color.NRGBA{R: 0x60, G: 0xa5, B: 0xfa, A: 0xff}
+		return color.NRGBA{R: 0x81, G: 0x8c, B: 0xf8, A: 0xff}
 	}
 	return theme.DefaultTheme().Color(name, theme.VariantDark)
 }
@@ -68,8 +100,28 @@ func (darkTheme) Font(style fyne.TextStyle) fyne.Resource {
 
 func (darkTheme) Size(name fyne.ThemeSizeName) float32 {
 	switch name {
+	case theme.SizeNameText:
+		return 13
+	case theme.SizeNameCaptionText:
+		return 11.5
+	case theme.SizeNameHeadingText:
+		return 20
+	case theme.SizeNameSubHeadingText:
+		return 15
 	case theme.SizeNameInputRadius, theme.SizeNameSelectionRadius:
-		return 8
+		return 6
+	case theme.SizeNameInputBorder:
+		return 1
+	case theme.SizeNameSeparatorThickness:
+		return 1
+	case theme.SizeNameInnerPadding:
+		return 9
+	case theme.SizeNameScrollBar:
+		return 6
+	case theme.SizeNameScrollBarSmall:
+		return 3
+	case theme.SizeNameScrollBarRadius:
+		return 3
 	}
 	return theme.DefaultTheme().Size(name)
 }

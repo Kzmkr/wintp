@@ -16,6 +16,7 @@ import (
 type Store struct {
 	mu          sync.RWMutex
 	connections []*Connection
+	syncJobs    []*SyncJob
 	dir         string
 	knownHosts  string
 }
@@ -36,6 +37,9 @@ func New(dir string) (*Store, error) {
 		}
 	}
 	if err := s.load(); err != nil {
+		return nil, err
+	}
+	if err := s.loadSyncJobs(); err != nil {
 		return nil, err
 	}
 	return s, nil

@@ -28,6 +28,7 @@ var rcloneSizeOrDurationPattern = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?([KMGTPE
 // SettingsController is the interface the window uses to talk to the app coordinator.
 type SettingsController interface {
 	PhoneController
+	SyncController
 	Connections() []*store.Connection
 	MountStatus(id string) mount.Status
 	RequestMount(id string)
@@ -57,15 +58,23 @@ type MainWindow struct {
 
 	list        *widget.List
 	searchEntry *widget.Entry
-	footerLbl   *widget.Label
+	footerLbl   *canvas.Text
+	footerDot   *canvas.Circle
 
 	// phone link entry (sidebar row + right-hand panel)
 	phoneRow   *phoneRow
 	phonePanel *phonePanel
 
+	// auto sync entry (sidebar row + right-hand panel)
+	syncRow   *syncRow
+	syncPanel *syncPanel
+
 	// fixed editor widgets (always present)
-	editorTitle     *widget.Label
-	editorSubtitle  *widget.Label
+	editorTitle     *canvas.Text
+	editorSubtitle  *canvas.Text
+	statusPill      *statusPill
+	authorizeBtn    *widget.Button
+	dangerCard      fyne.CanvasObject
 	providerCards   []*providerCard // featured provider quick-pick grid
 	providerSel     *widget.Select  // full catalog fallback ("more providers")
 	nameEntry       *widget.Entry
@@ -106,7 +115,10 @@ type MainWindow struct {
 func OpenMainWindow(a fyne.App, ctrl SettingsController) *MainWindow {
 	mw := &MainWindow{ctrl: ctrl, selectedIdx: -1}
 	mw.conns = ctrl.Connections()
+	// The window must exist before the panels: their dialogs use it as parent.
+	mw.win = a.NewWindow("wintp")
 	mw.phonePanel = newPhonePanel(ctrl, mw.win)
+	mw.syncPanel = newSyncPanel(ctrl, func() fyne.Window { return mw.win })
 	mw.initFixedWidgets()
 	mw.buildWindow(a)
 	mw.updateFooter()
@@ -127,6 +139,8 @@ func (mw *MainWindow) Refresh() {
 	fyne.Do(func() {
 		mw.phonePanel.Refresh()
 		mw.phoneRow.Update()
+		mw.syncPanel.Refresh()
+		mw.syncRow.Update()
 		mw.applyFilter()
 		if mw.selectedIdx >= 0 && mw.selectedIdx < len(mw.conns) {
 			mw.refreshMountBtn(mw.conns[mw.selectedIdx])
@@ -181,43 +195,88 @@ func (mw *MainWindow) updateFooter() {
 	if mounted == 0 {
 		mountedText = "none mounted"
 	}
-	mw.footerLbl.SetText(fmt.Sprintf("%d %s · %s", len(all), word, mountedText))
+	setText(mw.footerLbl, fmt.Sprintf("%d %s  ·  %s", len(all), word, mountedText))
+	if mounted > 0 {
+		mw.footerDot.FillColor = colSuccess
+	} else {
+		mw.footerDot.FillColor = colFaint
+	}
+	mw.footerDot.Refresh()
 }
 
 // window construction
 
+const sidebarWidth = 284
+
 func (mw *MainWindow) buildWindow(a fyne.App) {
-	mw.win = a.NewWindow("wintp")
-	mw.win.Resize(fyne.NewSize(900, 580))
+	mw.win.Resize(fyne.NewSize(1040, 680))
 	mw.win.SetCloseIntercept(mw.win.Hide)
+	mw.win.SetPadded(false)
 
 	mw.hintContent = mw.buildHint()
 	mw.fieldFormWrap = container.NewStack()
 	mw.editorContent = mw.buildEditorShell()
 	mw.rightStack = container.NewStack(mw.hintContent)
 
-	split := container.NewHSplit(
-		mw.buildLeft(),
-		container.NewPadded(mw.rightStack),
-	)
-	split.Offset = 0.32
-	mw.win.SetContent(split)
+	edge := canvas.NewRectangle(colBorder)
+	edge.SetMinSize(fyne.NewSize(1, 1))
+	sidebar := container.NewBorder(nil, nil, nil, edge,
+		container.New(fixedWidthLayout{width: sidebarWidth}, mw.buildLeft()))
+
+	mw.win.SetContent(container.NewBorder(nil, nil, sidebar, nil, mw.rightStack))
+}
+
+// connRowItem is one entry in the sidebar connection list.
+type connRowItem struct {
+	widget.BaseWidget
+	badge *badge
+	name  *widget.Label
+	sub   *widget.Label
+	dot   *canvas.Circle
+	root  fyne.CanvasObject
+}
+
+func newConnRowItem() *connRowItem {
+	r := &connRowItem{
+		badge: newBadge("", 32),
+		name:  widget.NewLabelWithStyle("", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		sub:   widget.NewLabel(""),
+		dot:   canvas.NewCircle(colFaint),
+	}
+	r.name.Truncation = fyne.TextTruncateEllipsis
+	r.sub.Truncation = fyne.TextTruncateEllipsis
+	r.sub.Importance = widget.LowImportance
+	r.sub.SizeName = theme.SizeNameCaptionText
+	dot := container.NewCenter(container.NewGridWrap(fyne.NewSize(8, 8), r.dot))
+	r.root = inset(7, 7, 8, 10, container.NewBorder(nil, nil,
+		inset(0, 0, 0, 10, container.NewCenter(r.badge.root)), inset(0, 0, 8, 0, dot),
+		vbox(2, unpadded(r.name), unpadded(r.sub))))
+	r.ExtendBaseWidget(r)
+	return r
+}
+
+func (r *connRowItem) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(r.root)
 }
 
 func (mw *MainWindow) buildLeft() fyne.CanvasObject {
-	brandIcon := widget.NewIcon(theme.StorageIcon())
-	brandLbl := widget.NewLabelWithStyle("wintp", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	logoBg := canvas.NewRectangle(colAccent)
+	logoBg.CornerRadius = 8
+	logoTxt := newText("W", 15, color.White, true)
+	logo := container.NewGridWrap(fyne.NewSize(30, 30), container.NewStack(logoBg, container.NewCenter(logoTxt)))
+	brand := vbox(1, newText("wintp", 15, colText, true), newText("Network drives", 11, colMuted, false))
+
 	addBtn := widget.NewButtonWithIcon("", theme.ContentAddIcon(), func() {
 		mw.list.UnselectAll()
 		mw.showNewEditor()
 	})
+	addBtn.Importance = widget.LowImportance
 	brandRow := container.NewBorder(nil, nil,
-		container.NewHBox(brandIcon, brandLbl), addBtn,
-		layout.NewSpacer(),
-	)
+		hbox(10, logo, container.NewCenter(brand)), container.NewCenter(addBtn))
 
 	mw.searchEntry = widget.NewEntry()
-	mw.searchEntry.PlaceHolder = "Search"
+	mw.searchEntry.PlaceHolder = "Search connections"
+	mw.searchEntry.ActionItem = widget.NewIcon(theme.SearchIcon())
 	mw.searchEntry.OnChanged = func(string) {
 		mw.cancelEdit()
 		mw.applyFilter()
@@ -225,102 +284,81 @@ func (mw *MainWindow) buildLeft() fyne.CanvasObject {
 
 	mw.phoneRow = newPhoneRow(mw.ctrl, mw.ShowPhone)
 	mw.phonePanel.onChange = mw.phoneRow.Update
-	deviceLbl := widget.NewLabelWithStyle("DEVICES", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	deviceLbl.Importance = widget.LowImportance
-
-	sectionLbl := widget.NewLabelWithStyle("CONNECTIONS", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	sectionLbl.Importance = widget.LowImportance
+	mw.syncRow = newSyncRow(mw.ctrl, mw.ShowAutoSync)
+	mw.syncPanel.onChange = func() {
+		mw.syncRow.Update()
+		mw.ctrl.OnSettingsChange()
+	}
 
 	mw.list = widget.NewList(
 		func() int { return len(mw.conns) },
-		func() fyne.CanvasObject {
-			badgeBg := canvas.NewRectangle(theme.Color(theme.ColorNameInputBackground))
-			badgeBg.CornerRadius = 6
-			badgeBg.StrokeWidth = 1
-			badgeBg.StrokeColor = theme.Color(theme.ColorNameInputBorder)
-			badgeLbl := widget.NewLabelWithStyle("", fyne.TextAlignCenter, fyne.TextStyle{Bold: true, Monospace: true})
-			badge := container.NewGridWrap(fyne.NewSize(36, 36),
-				container.NewStack(badgeBg, container.NewCenter(badgeLbl)))
-
-			name := widget.NewLabelWithStyle("", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-			sub := widget.NewLabel("")
-			sub.Importance = widget.LowImportance
-			text := container.NewVBox(name, sub)
-
-			dot := canvas.NewCircle(theme.Color(theme.ColorNameDisabled))
-			dotWrap := container.NewGridWrap(fyne.NewSize(8, 8), dot)
-
-			return container.NewBorder(nil, nil, badge, container.NewCenter(dotWrap), text)
-		},
+		func() fyne.CanvasObject { return newConnRowItem() },
 		func(id widget.ListItemID, o fyne.CanvasObject) {
 			if id >= len(mw.conns) {
 				return
 			}
 			c := mw.conns[id]
-			st := mw.ctrl.MountStatus(c.ID)
-
-			row := o.(*fyne.Container)
-			text := row.Objects[0].(*fyne.Container)
-			badge := row.Objects[1].(*fyne.Container)
-			dotCenter := row.Objects[2].(*fyne.Container)
-
-			badgeStack := badge.Objects[0].(*fyne.Container)
-			badgeLbl := badgeStack.Objects[1].(*fyne.Container).Objects[0].(*widget.Label)
-			badgeLbl.SetText(badgeFor(providerForConn(c)))
-
-			dotWrap := dotCenter.Objects[0].(*fyne.Container)
-			dot := dotWrap.Objects[0].(*canvas.Circle)
-			dot.FillColor = statusColor(st.State)
-			dot.Refresh()
-
-			name := text.Objects[0].(*widget.Label)
-			sub := text.Objects[1].(*widget.Label)
-			name.SetText(c.Name)
-			sub.SetText(c.DriveLetter + ":  ·  " + providerDisplayName(c))
+			r := o.(*connRowItem)
+			r.badge.SetText(badgeFor(providerForConn(c)))
+			r.dot.FillColor = statusColor(mw.ctrl.MountStatus(c.ID).State)
+			r.dot.Refresh()
+			r.name.SetText(c.Name)
+			r.sub.SetText(c.DriveLetter + ":  ·  " + providerDisplayName(c))
 		},
 	)
+	mw.list.HideSeparators = true
 	mw.list.OnSelected = func(id widget.ListItemID) {
 		if id < len(mw.conns) {
 			mw.showEditor(id)
 		}
 	}
 
-	top := container.NewVBox(
-		container.NewPadded(brandRow),
-		container.NewPadded(mw.searchEntry),
-		container.NewPadded(deviceLbl),
-		mw.phoneRow.Object(),
-		container.NewPadded(sectionLbl),
+	top := vbox(8,
+		inset(18, 6, 16, 12, brandRow),
+		inset(0, 6, 12, 12, mw.searchEntry),
+		inset(0, 0, 16, 16, overline("PHONE & SYNC")),
+		inset(0, 0, 8, 8, vbox(2, mw.phoneRow.Object(), mw.syncRow.Object())),
+		inset(6, 0, 16, 16, overline("CONNECTIONS")),
 	)
 
-	mw.footerLbl = widget.NewLabel("")
-	mw.footerLbl.Importance = widget.LowImportance
-	footerDot := canvas.NewCircle(theme.Color(theme.ColorNameDisabled))
+	mw.footerLbl = newText("", 11.5, colMuted, false)
+	mw.footerDot = canvas.NewCircle(colFaint)
 	footer := container.NewVBox(
-		widget.NewSeparator(),
-		container.NewPadded(container.NewHBox(
-			container.NewCenter(container.NewGridWrap(fyne.NewSize(8, 8), footerDot)),
+		divider(),
+		inset(12, 12, 18, 16, hbox(8,
+			container.NewCenter(container.NewGridWrap(fyne.NewSize(7, 7), mw.footerDot)),
 			mw.footerLbl,
 		)),
 	)
 
-	return container.NewBorder(top, footer, nil, nil, mw.list)
+	bg := canvas.NewRectangle(colSidebar)
+	return container.NewStack(bg, container.NewBorder(top, footer, nil, nil, inset(0, 0, 8, 8, mw.list)))
 }
 
 func (mw *MainWindow) buildHint() fyne.CanvasObject {
+	tileBg := canvas.NewRectangle(colAccentSoft)
+	tileBg.CornerRadius = 14
 	icon := widget.NewIcon(theme.StorageIcon())
-	iconWrap := container.NewGridWrap(fyne.NewSize(48, 48), icon)
+	tile := container.NewGridWrap(fyne.NewSize(60, 60),
+		container.NewStack(tileBg, inset(14, 14, 14, 14, icon)))
 
-	title := widget.NewLabelWithStyle("No connection selected", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
-	body := widget.NewLabel("Select a connection on the left to edit it,\nor add a new one to mount a drive.")
-	body.Alignment = fyne.TextAlignCenter
-	body.Wrapping = fyne.TextWrapWord
-	body.Importance = widget.LowImportance
+	title := newText("No connection selected", 17, colText, true)
+	title.Alignment = fyne.TextAlignCenter
+	body1 := newText("Pick a connection on the left to edit it,", 12.5, colMuted, false)
+	body2 := newText("or add one to mount a server as a drive.", 12.5, colMuted, false)
+	body1.Alignment, body2.Alignment = fyne.TextAlignCenter, fyne.TextAlignCenter
 
-	return container.NewCenter(container.NewVBox(
-		container.NewCenter(iconWrap),
-		title,
-		body,
+	newBtn := widget.NewButtonWithIcon("New connection", theme.ContentAddIcon(), func() {
+		mw.list.UnselectAll()
+		mw.showNewEditor()
+	})
+	newBtn.Importance = widget.HighImportance
+
+	return container.NewCenter(vbox(6,
+		container.NewCenter(tile),
+		inset(12, 0, 0, 0, title),
+		body1, body2,
+		inset(14, 0, 0, 0, container.NewCenter(newBtn)),
 	))
 }
 
@@ -334,9 +372,9 @@ var cacheModeCaptions = map[string]string{
 }
 
 func (mw *MainWindow) initFixedWidgets() {
-	mw.editorTitle = widget.NewLabelWithStyle("", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	mw.editorSubtitle = widget.NewLabel("")
-	mw.editorSubtitle.Importance = widget.LowImportance
+	mw.editorTitle = newText("", 20, colText, true)
+	mw.editorSubtitle = newText("", 12.5, colMuted, false)
+	mw.statusPill = newStatusPill()
 
 	// Full catalog fallback dropdown, in group order, for providers not in
 	// the featured quick-pick grid.
@@ -357,15 +395,15 @@ func (mw *MainWindow) initFixedWidgets() {
 			return
 		}
 		mw.applyProviderSelection(def, nil)
-		mw.editorSubtitle.SetText(def.Name + "  →  " + mw.driveSelect.Selected + ":")
+		setText(mw.editorSubtitle, def.Name+"  →  "+mw.driveSelect.Selected+":")
 	}
 
 	mw.providerCards = nil
 	for _, def := range FeaturedProviders() {
 		def := def
-		mw.providerCards = append(mw.providerCards, newProviderCard(def.Name, def.Subtitle, func() {
+		mw.providerCards = append(mw.providerCards, newProviderCard(def, func() {
 			mw.applyProviderSelection(def, nil)
-			mw.editorSubtitle.SetText(def.Name + "  →  " + mw.driveSelect.Selected + ":")
+			setText(mw.editorSubtitle, def.Name+"  →  "+mw.driveSelect.Selected+":")
 		}))
 	}
 
@@ -379,6 +417,7 @@ func (mw *MainWindow) initFixedWidgets() {
 
 	mw.cacheCaptionLbl = widget.NewLabel("")
 	mw.cacheCaptionLbl.Importance = widget.LowImportance
+	mw.cacheCaptionLbl.SizeName = theme.SizeNameCaptionText
 	mw.cacheCaptionLbl.Wrapping = fyne.TextWrapWord
 
 	mw.cacheSeg = newSegmentedControl(
@@ -392,17 +431,18 @@ func (mw *MainWindow) initFixedWidgets() {
 
 	mw.testStatusLbl = widget.NewLabel("")
 	mw.testStatusLbl.Wrapping = fyne.TextWrapWord
+	mw.testStatusLbl.SizeName = theme.SizeNameCaptionText
 
 	mw.oauthStatusLbl = widget.NewLabel("")
 	mw.oauthStatusLbl.Wrapping = fyne.TextWrapWord
+	mw.oauthStatusLbl.SizeName = theme.SizeNameCaptionText
 
 	mw.mountBtn = widget.NewButtonWithIcon("Mount", theme.MediaPlayIcon(), nil)
-	mw.mountBtn.Importance = widget.SuccessImportance
 
-	mw.saveBtn = widget.NewButtonWithIcon("Save", theme.ConfirmIcon(), nil)
+	mw.saveBtn = widget.NewButtonWithIcon("Save changes", theme.ConfirmIcon(), nil)
 	mw.saveBtn.Importance = widget.HighImportance
 
-	mw.cancelBtn = widget.NewButtonWithIcon("Cancel", theme.CancelIcon(), nil)
+	mw.cancelBtn = widget.NewButton("Cancel", nil)
 
 	mw.deleteBtn = widget.NewButtonWithIcon("Delete", theme.DeleteIcon(), nil)
 	mw.deleteBtn.Importance = widget.DangerImportance
@@ -423,118 +463,93 @@ func (mw *MainWindow) initFixedWidgets() {
 	mw.readChunkSizeEntry.PlaceHolder = "e.g. 128M  (empty = rclone default)"
 }
 
-// sectionHeading returns a bold title with a muted one-line description
-// underneath, matching the "Provider / Where the files live." style used
-// throughout the editor.
-func sectionHeading(title, subtitle string) fyne.CanvasObject {
-	t := widget.NewLabelWithStyle(title, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	if subtitle == "" {
-		return t
-	}
-	s := widget.NewLabel(subtitle)
-	s.Importance = widget.LowImportance
-	return container.NewVBox(t, s)
+// setText updates a canvas.Text in place.
+func setText(t *canvas.Text, s string) {
+	t.Text = s
+	t.Refresh()
+}
+
+// pageHeader is the title bar at the top of a right-hand panel.
+func pageHeader(title, subtitle fyne.CanvasObject, trailing fyne.CanvasObject) fyne.CanvasObject {
+	return container.NewVBox(
+		inset(22, 18, 28, 24, container.NewBorder(nil, nil, nil, trailing, vbox(5, title, subtitle))),
+		divider(),
+	)
+}
+
+// pageBody wraps a panel's cards in a scrolling, padded column.
+func pageBody(cards ...fyne.CanvasObject) fyne.CanvasObject {
+	return container.NewVScroll(inset(22, 28, 28, 28, vbox(16, cards...)))
 }
 
 // buildEditorShell builds the static editor chrome; the dynamic form area is in fieldFormWrap.
 func (mw *MainWindow) buildEditorShell() fyne.CanvasObject {
-	nameForm := widget.NewForm(widget.NewFormItem("Name", mw.nameEntry))
-
-	cardsGrid := container.NewGridWithColumns(4)
-	for _, card := range mw.providerCards {
-		cardsGrid.Add(card)
+	cardsGrid := container.NewGridWithColumns(3)
+	for _, c := range mw.providerCards {
+		cardsGrid.Add(c.Object())
 	}
-	providerSection := container.NewVBox(
-		sectionHeading("Provider", "Where the files live."),
-		cardsGrid,
-		mw.providerSel,
+
+	testBtn := widget.NewButtonWithIcon("Test connection", theme.ViewRefreshIcon(), mw.testConnection)
+	mw.authorizeBtn = widget.NewButtonWithIcon("Authorize in browser", theme.LoginIcon(), mw.doOAuthAuthorize)
+	mw.authorizeBtn.Importance = widget.HighImportance
+
+	connectionCard := card("Connection", "Give it a name and choose where the files live.",
+		field("Name", mw.nameEntry),
+		field("Provider", vbox(10, cardsGrid, mw.providerSel)),
 	)
 
-	testBtn := widget.NewButtonWithIcon("Test", theme.ViewRefreshIcon(), mw.testConnection)
-	authorizeBtn := widget.NewButtonWithIcon("Authorize in Browser", theme.LoginIcon(), mw.doOAuthAuthorize)
-	authorizeBtn.Importance = widget.SuccessImportance
-	oauthSection := container.NewVBox(authorizeBtn, mw.oauthStatusLbl)
-
-	signInSection := container.NewVBox(
-		sectionHeading("Sign in", "Stored in the Windows Credential Manager."),
+	signInCard := card("Sign in", "Passwords are stored in Windows Credential Manager.",
 		mw.fieldFormWrap, // provider-specific fields live here
-		oauthSection,
+		container.NewBorder(nil, nil, hbox(8, testBtn, mw.authorizeBtn), nil,
+			inset(0, 0, 12, 0, container.NewVBox(layout.NewSpacer(), unpadded(mw.testStatusLbl), layout.NewSpacer()))),
+		mw.oauthStatusLbl,
 	)
 
-	connectionCard := widget.NewCard("", "", container.NewVBox(
-		nameForm,
-		widget.NewSeparator(),
-		providerSection,
-		widget.NewSeparator(),
-		signInSection,
-	))
-
-	mountForm := widget.NewForm(
-		widget.NewFormItem("Remote path", mw.pathEntry),
-		widget.NewFormItem("Drive letter", mw.driveSelect),
-	)
-
-	cacheModeSection := container.NewVBox(
-		widget.NewLabel("VFS cache"),
-		mw.cacheSeg.CanvasObject(),
-		mw.cacheCaptionLbl,
-	)
-
-	behaviorSection := container.NewVBox(
-		widget.NewSeparator(),
+	mountCard := card("Mount", "How the drive shows up in File Explorer.",
+		container.NewGridWithColumns(2,
+			field("Remote path", mw.pathEntry),
+			field("Drive letter", mw.driveSelect),
+		),
+		field("VFS cache", vbox(8, mw.cacheSeg.CanvasObject(), unpadded(mw.cacheCaptionLbl))),
+		divider(),
 		settingsRow("Mount on startup", "Connect when wintp launches.", mw.autoMountToggle),
-		widget.NewSeparator(),
+		divider(),
 		settingsRow("Reconnect on error", "Retry automatically if the connection drops.", mw.autoReconToggle),
 	)
 
-	mountCard := widget.NewCard("", "", container.NewVBox(
-		sectionHeading("Mount", "How it shows up in File Explorer."),
-		mountForm,
-		cacheModeSection,
-		behaviorSection,
-	))
+	advanced := widget.NewAccordion(widget.NewAccordionItem("Advanced cache settings",
+		inset(8, 4, 0, 0, vbox(12,
+			container.NewGridWithColumns(2,
+				field("Max cache size", mw.cacheMaxSizeEntry),
+				field("Max cache age", mw.cacheMaxAgeEntry),
+			),
+			container.NewGridWithColumns(2,
+				field("Dir cache time", mw.dirCacheTimeEntry),
+				field("Buffer size", mw.bufferSizeEntry),
+			),
+			container.NewGridWithColumns(2,
+				field("Read chunk size", mw.readChunkSizeEntry),
+				layout.NewSpacer(),
+			),
+		))))
+	advancedCard := card("", "", advanced)
 
-	cacheForm := widget.NewForm(
-		widget.NewFormItem("Max cache size", mw.cacheMaxSizeEntry),
-		widget.NewFormItem("Max cache age", mw.cacheMaxAgeEntry),
-		widget.NewFormItem("Dir cache time", mw.dirCacheTimeEntry),
-		widget.NewFormItem("Buffer size", mw.bufferSizeEntry),
-		widget.NewFormItem("Read chunk size", mw.readChunkSizeEntry),
-	)
-	advancedCard := widget.NewCard("", "", widget.NewAccordion(
-		widget.NewAccordionItem("Advanced cache settings", cacheForm),
-	))
+	mw.dangerCard = card("", "",
+		settingsRow("Delete connection", "Removes it from wintp along with its saved password.", mw.deleteBtn))
 
-	scrollable := container.NewScroll(container.NewVBox(
-		connectionCard,
-		mountCard,
-		advancedCard,
-	))
-
-	const actionBtnHeight = 32
-	const actionGap = 10
+	const actionBtnHeight = 34
 	mw.mountBtnWrap = shortButton(actionBtnHeight, mw.mountBtn)
-	actions := container.NewHBox(
-		mw.mountBtnWrap, hGap(actionGap),
-		shortButton(actionBtnHeight, testBtn), hGap(actionGap),
-		shortButton(actionBtnHeight, mw.cancelBtn), hGap(actionGap),
+	actions := container.NewCenter(hbox(8,
+		mw.mountBtnWrap,
+		shortButton(actionBtnHeight, mw.cancelBtn),
 		shortButton(actionBtnHeight, mw.saveBtn),
-	)
-	headerTop := container.NewBorder(nil, nil, nil, actions,
-		container.NewVBox(mw.editorTitle, mw.editorSubtitle),
-	)
-	header := container.NewVBox(
-		container.NewPadded(headerTop),
-		container.NewPadded(mw.testStatusLbl),
-		widget.NewSeparator(),
-	)
+	))
 
-	footer := container.NewVBox(
-		widget.NewSeparator(),
-		container.NewPadded(mw.deleteBtn),
-	)
+	titleRow := hbox(12, mw.editorTitle, mw.statusPill.root)
+	header := pageHeader(titleRow, mw.editorSubtitle, actions)
 
-	return container.NewBorder(header, footer, nil, nil, scrollable)
+	return container.NewBorder(header, nil, nil, nil,
+		pageBody(connectionCard, signInCard, mountCard, advancedCard, mw.dangerCard))
 }
 
 // setProviderSelection reflects def as the chosen provider across both the
@@ -598,11 +613,11 @@ func (mw *MainWindow) rebuildProviderFields(def *ProviderDef, existing map[strin
 	var rows []fyne.CanvasObject
 	for i := 0; i < len(def.Fields); {
 		f := def.Fields[i]
-		item1 := widget.NewForm(widget.NewFormItem(f.Label, buildEntry(f)))
+		item1 := field(f.Label, buildEntry(f))
 
 		if f.Row != "" && i+1 < len(def.Fields) && def.Fields[i+1].Row == f.Row {
 			f2 := def.Fields[i+1]
-			item2 := widget.NewForm(widget.NewFormItem(f2.Label, buildEntry(f2)))
+			item2 := field(f2.Label, buildEntry(f2))
 			rows = append(rows, container.NewGridWithColumns(2, item1, item2))
 			i += 2
 			continue
@@ -612,7 +627,7 @@ func (mw *MainWindow) rebuildProviderFields(def *ProviderDef, existing map[strin
 		i++
 	}
 
-	mw.fieldForm = container.NewVBox(rows...)
+	mw.fieldForm = vbox(12, rows...)
 	mw.fieldFormWrap.Objects = []fyne.CanvasObject{mw.fieldForm}
 	mw.fieldFormWrap.Refresh()
 
@@ -621,8 +636,12 @@ func (mw *MainWindow) rebuildProviderFields(def *ProviderDef, existing map[strin
 	// for simplicity just update the label text so the section is always rendered
 	// but the Authorize button is only meaningful for OAuth.
 	if def.IsOAuth {
-		mw.testStatusLbl.SetText("(use Authorize to verify OAuth credentials)")
+		mw.authorizeBtn.Show()
+		mw.oauthStatusLbl.Show()
+		mw.testStatusLbl.SetText("Use Authorize to verify OAuth credentials.")
 	} else {
+		mw.authorizeBtn.Hide()
+		mw.oauthStatusLbl.Hide()
 		mw.testStatusLbl.SetText("")
 		mw.oauthStatusLbl.SetText("")
 	}
@@ -632,11 +651,12 @@ func (mw *MainWindow) rebuildProviderFields(def *ProviderDef, existing map[strin
 
 func (mw *MainWindow) showEditor(idx int) {
 	mw.phoneRow.SetSelected(false)
+	mw.syncRow.SetSelected(false)
 	mw.selectedIdx = idx
 	c := mw.conns[idx]
 
-	mw.editorTitle.SetText(c.Name)
-	mw.editorSubtitle.SetText(providerDisplayName(c) + "  →  " + c.DriveLetter + ":")
+	setText(mw.editorTitle, c.Name)
+	setText(mw.editorSubtitle, providerDisplayName(c)+"  →  "+c.DriveLetter+":")
 	mw.nameEntry.SetText(c.Name)
 	mw.pathEntry.SetText(c.RemotePath)
 	mw.autoMountToggle.SetChecked(c.AutoMount)
@@ -693,7 +713,8 @@ func (mw *MainWindow) showEditor(idx int) {
 
 	mw.refreshMountBtn(c)
 	mw.testStatusLbl.SetText("")
-	mw.deleteBtn.Show()
+	mw.dangerCard.Show()
+	mw.saveBtn.SetText("Save changes")
 	mw.saveBtn.OnTapped = func() { mw.saveEdit() }
 	mw.cancelBtn.OnTapped = func() { mw.cancelEdit() }
 	mw.deleteBtn.OnTapped = func() { mw.deleteEdit() }
@@ -704,9 +725,10 @@ func (mw *MainWindow) showEditor(idx int) {
 
 func (mw *MainWindow) showNewEditor() {
 	mw.phoneRow.SetSelected(false)
+	mw.syncRow.SetSelected(false)
 	mw.selectedIdx = len(mw.conns)
 
-	mw.editorTitle.SetText("New connection")
+	setText(mw.editorTitle, "New connection")
 	mw.nameEntry.SetText("")
 	mw.pathEntry.SetText("/")
 	mw.autoMountToggle.SetChecked(false)
@@ -716,7 +738,9 @@ func (mw *MainWindow) showNewEditor() {
 	mw.testStatusLbl.SetText("")
 	mw.oauthStatusLbl.SetText("")
 	mw.mountBtnWrap.Hide()
-	mw.deleteBtn.Hide()
+	mw.dangerCard.Hide()
+	mw.statusPill.root.Hide()
+	mw.saveBtn.SetText("Create")
 	mw.cacheMaxSizeEntry.SetText("")
 	mw.cacheMaxAgeEntry.SetText("")
 	mw.dirCacheTimeEntry.SetText("")
@@ -736,7 +760,7 @@ func (mw *MainWindow) showNewEditor() {
 		def = *fp[0]
 	}
 	mw.applyProviderSelection(&def, nil)
-	mw.editorSubtitle.SetText(def.Name + "  →  " + mw.driveSelect.Selected + ":")
+	setText(mw.editorSubtitle, def.Name+"  →  "+mw.driveSelect.Selected+":")
 
 	mw.saveBtn.OnTapped = func() { mw.saveNew() }
 	mw.cancelBtn.OnTapped = func() { mw.cancelEdit() }
@@ -752,13 +776,28 @@ func (mw *MainWindow) ShowPhone() {
 	mw.selectedIdx = -1
 	mw.phonePanel.Refresh()
 	mw.phoneRow.Update()
+	mw.syncRow.SetSelected(false)
 	mw.phoneRow.SetSelected(true)
 	mw.rightStack.Objects = []fyne.CanvasObject{mw.phonePanel.Content()}
 	mw.rightStack.Refresh()
 }
 
+// ShowAutoSync shows the window with the auto-sync entry selected.
+func (mw *MainWindow) ShowAutoSync() {
+	mw.Show()
+	mw.list.UnselectAll()
+	mw.selectedIdx = -1
+	mw.syncPanel.Refresh()
+	mw.syncRow.Update()
+	mw.phoneRow.SetSelected(false)
+	mw.syncRow.SetSelected(true)
+	mw.rightStack.Objects = []fyne.CanvasObject{mw.syncPanel.Content()}
+	mw.rightStack.Refresh()
+}
+
 func (mw *MainWindow) cancelEdit() {
 	mw.phoneRow.SetSelected(false)
+	mw.syncRow.SetSelected(false)
 	mw.selectedIdx = -1
 	mw.list.UnselectAll()
 	mw.rightStack.Objects = []fyne.CanvasObject{mw.hintContent}
@@ -767,11 +806,13 @@ func (mw *MainWindow) cancelEdit() {
 
 func (mw *MainWindow) refreshMountBtn(c *store.Connection) {
 	st := mw.ctrl.MountStatus(c.ID)
+	mw.statusPill.Set(statusText(st.State), statusColor(st.State))
+	mw.statusPill.root.Show()
 	switch st.State {
 	case mount.StateMounted:
 		mw.mountBtn.SetIcon(theme.MediaStopIcon())
 		mw.mountBtn.SetText("Unmount " + c.DriveLetter + ":")
-		mw.mountBtn.Importance = widget.DangerImportance
+		mw.mountBtn.Importance = widget.MediumImportance
 		mw.mountBtn.OnTapped = func() { mw.ctrl.RequestUnmount(c.ID) }
 		mw.mountBtn.Enable()
 	case mount.StateMounting, mount.StateUnmounting:
@@ -789,10 +830,11 @@ func (mw *MainWindow) refreshMountBtn(c *store.Connection) {
 	default:
 		mw.mountBtn.SetIcon(theme.MediaPlayIcon())
 		mw.mountBtn.SetText("Mount " + c.DriveLetter + ":")
-		mw.mountBtn.Importance = widget.SuccessImportance
+		mw.mountBtn.Importance = widget.MediumImportance
 		mw.mountBtn.OnTapped = func() { mw.ctrl.RequestMount(c.ID) }
 		mw.mountBtn.Enable()
 	}
+	mw.mountBtn.Refresh()
 	mw.mountBtnWrap.Show()
 }
 
@@ -1098,6 +1140,21 @@ func (mw *MainWindow) doOAuthAuthorize() {
 }
 
 // helpers
+
+func statusText(s mount.State) string {
+	switch s {
+	case mount.StateMounted:
+		return "Mounted"
+	case mount.StateMounting:
+		return "Mounting"
+	case mount.StateUnmounting:
+		return "Unmounting"
+	case mount.StateError:
+		return "Error"
+	default:
+		return "Not mounted"
+	}
+}
 
 func statusColor(s mount.State) color.Color {
 	switch s {

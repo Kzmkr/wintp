@@ -79,3 +79,22 @@ func TestReadinessFromLogLine(t *testing.T) {
 		t.Fatalf("plain failed line = (%v, %v), want error", err, ok)
 	}
 }
+
+func TestVolumeIdentityIsStablePerConnection(t *testing.T) {
+	a1 := strings.Join(VolumeIdentityArgs("conn-a"), " ")
+	a2 := strings.Join(VolumeIdentityArgs("conn-a"), " ")
+	b := strings.Join(VolumeIdentityArgs("conn-b"), " ")
+	if a1 != a2 {
+		t.Fatalf("identity changed between calls: %q vs %q", a1, a2)
+	}
+	if a1 == b {
+		t.Fatalf("different connections share an identity: %q", a1)
+	}
+	if !strings.Contains(a1, "-o VolumeSerialNumber=") || !strings.Contains(a1, "-o VolumeCreationTime=") {
+		t.Fatalf("missing WinFsp volume options: %q", a1)
+	}
+	got := strings.Join(MountArgs(&store.Connection{ID: "conn-a", DriveLetter: "Z"}, "rclone.conf"), " ")
+	if !strings.Contains(got, a1) {
+		t.Fatalf("MountArgs %q does not pin the volume identity %q", got, a1)
+	}
+}

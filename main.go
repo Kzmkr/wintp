@@ -17,12 +17,14 @@ import (
 	"fyne.io/fyne/v2/widget"
 	"golang.org/x/sys/windows"
 
+	"wintp/internal/autosync"
 	"wintp/internal/cred"
 	"wintp/internal/link"
 	"wintp/internal/mount"
 	rcloneSvc "wintp/internal/rclone"
 	"wintp/internal/singleinstance"
 	"wintp/internal/store"
+	"wintp/internal/thumbs"
 	"wintp/internal/tray"
 	"wintp/internal/ui"
 	"wintp/internal/util"
@@ -104,6 +106,8 @@ func main() {
 
 	coord.SyncRemotes()
 	coord.initLink()
+	coord.initAutoSync()
+	coord.initThumbs()
 
 	// Build tray (sets up the system tray menu).
 	t := tray.New(a, coord)
@@ -113,8 +117,12 @@ func main() {
 	mainWin := ui.OpenMainWindow(a, coord)
 	coord.mainWin = mainWin
 	mainWin.Show()
+	coord.autosync.Start()
 
 	sv.OnStatusChange = func(connID string, s mount.Status) {
+		if connID == phoneDriveID {
+			coord.syncThumbs()
+		}
 		coord.tray.Rebuild()
 		coord.mainWin.Refresh()
 	}
@@ -135,6 +143,8 @@ func main() {
 	a.Run()
 
 	// Clean shutdown.
+	coord.autosync.Stop()
+	coord.thumbs.Stop()
 	if coord.link != nil {
 		coord.link.Stop()
 	}
@@ -177,6 +187,8 @@ type coordinator struct {
 	rcloneBin string
 	appDir    string
 
+	autosync    *autosync.Manager
+	thumbs      *thumbs.Prewarmer
 	link        *link.Server
 	linkRunning atomic.Bool
 }
@@ -310,6 +322,7 @@ func (c *coordinator) UpdateConnection(conn *store.Connection, password string) 
 
 func (c *coordinator) DeleteConnection(id string) error {
 	c.sv.Unmount(id)
+	c.deleteSyncJobsFor(id)
 	if err := c.store.Delete(id); err != nil {
 		return err
 	}
